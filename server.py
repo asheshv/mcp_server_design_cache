@@ -53,6 +53,9 @@ MIGRATIONS = {
     1: """
     ALTER TABLE design_cache ADD COLUMN IF NOT EXISTS tags TEXT[];
     CREATE INDEX IF NOT EXISTS idx_tags ON design_cache USING GIN(tags);
+    """,
+    2: """
+    CREATE INDEX IF NOT EXISTS idx_semantic ON design_cache USING hnsw (embedding vector_cosine_ops);
     """
 }
 

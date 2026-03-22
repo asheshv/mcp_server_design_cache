@@ -16,5 +16,5 @@
 - [ ] **Batch Storage**: Implement `batch_store_notes` for bulk data ingestion.
 - [x] **Adaptive Compression**: Automate `summarize_and_cleanup` based on token usage patterns.
 - [ ] **Search Web Sync**: Tool to fetch external documentation and store in the cache directly.
-- [ ] **HNSW Indexing**: Explore HNSW for faster vector search on massive datasets.
+- [x] **HNSW Indexing**: Explore HNSW for faster vector search on massive datasets.
 - [ ] **Export to PDF/DOCX**: Enhancing the project export tool.
