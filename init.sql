@@ -34,10 +34,11 @@ CREATE TABLE IF NOT EXISTS retention_policies (
 -- 5. Secure RBAC
 DO $$ BEGIN
     IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'design_readonly') THEN
-        CREATE ROLE design_readonly WITH LOGIN PASSWORD 'read_password';
+        -- Password should be set via environment during deployment
+        CREATE ROLE design_readonly WITH LOGIN;
     END IF;
     IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'design_readwrite') THEN
-        CREATE ROLE design_readwrite WITH LOGIN PASSWORD 'write_password';
+        CREATE ROLE design_readwrite WITH LOGIN;
     END IF;
 END $$;
 

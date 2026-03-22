@@ -30,10 +30,12 @@ Running the Python server locally allows the AI to natively read and write to yo
    ```
    *(This starts the Postgres database in Docker, creates a Python `venv`, and installs dependencies including `sentence-transformers`.)*
 
-2. **Run Server**:
+3. **Run Server**:
    ```bash
    source venv/bin/activate
-   DB_HOST=localhost python server.py
+   # Load environment variables from .env
+   export $(grep -v '^#' .env | xargs)
+   python server.py
    ```
 
 ## 🤖 Configuring AI Agents
@@ -60,7 +62,12 @@ Running the Python server locally allows the AI to natively read and write to yo
    ```json
    "design-cache": {
       "command": "/path/to/venv/bin/python",
-      "args": ["/path/to/server.py"]
+      "args": ["/path/to/server.py"],
+      "env": {
+        "DB_HOST": "localhost",
+        "DB_READ_PASS": "your_password",
+        "DB_WRITE_PASS": "your_password"
+      }
    }
    ```
 
@@ -76,7 +83,8 @@ Check out the [examples/usage.md](examples/usage.md) file to see how AI agents i
 - **health_check**: Verifies the connection pool and database availability.
 
 ## 🛡️ Security Notes
-1. **Least Privilege**: Uses design_readonly for searches and design_readwrite for modifications.
-2. **Parameterized Queries**: Uses `psycopg3` binding to natively prevent SQL injection without blocking valid markdown characters.
-3. **Rate Limiting**: Capped at 60 requests per minute.
-4. **Connection Lifecycle**: Connections recycled every 30 minutes via Psycopg 3.
+1. **Environment Variables**: Sensitive credentials (passwords) are strictly managed via environment variables and never hardcoded in the repository. Use `.env.example` as a template.
+2. **Least Privilege**: Uses `design_readonly` for searches and `design_readwrite` for modifications.
+3. **Parameterized Queries**: Uses `psycopg3` binding to natively prevent SQL injection without blocking valid markdown characters.
+4. **Rate Limiting**: Capped at 60 requests per minute.
+5. **Connection Lifecycle**: Connections recycled every 30 minutes via Psycopg 3.

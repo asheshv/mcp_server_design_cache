@@ -32,13 +32,28 @@ echo "📥 Installing Python requirements (This might take a minute for sentence
 pip install --upgrade pip
 pip install -r requirements.txt
 
+# 5. Handle Environment Variables
+echo ""
+echo "🔐 Configuring Environment..."
+if [ ! -f ".env" ]; then
+    echo "📄 .env not found. Creating from .env.example..."
+    cp .env.example .env
+    echo "⚠️  Please update .env with your real database passwords!"
+else
+    echo "✅ .env already exists."
+fi
+
 echo ""
 echo "✅ Setup complete! The database is running in Docker and Python dependencies are installed locally."
 echo ""
 echo "To run the server, use:"
 echo "  source venv/bin/activate"
-echo "  DB_HOST=localhost python server.py"
+echo "  # Secrets are loaded from .env if you use a library like python-dotenv"
+echo "  # For now, run with export or inline:"
+echo "  export $(grep -v '^#' .env | xargs)"
+echo "  python server.py"
 echo ""
 echo "To configure your AI Agent (e.g. Claude Desktop or Cursor), update the command to path to your venv python:"
 echo "  Command: $(pwd)/venv/bin/python"
 echo "  Args:    [$(pwd)/server.py]"
+echo "  Env:     DB_READ_PASS=..., DB_WRITE_PASS=..."

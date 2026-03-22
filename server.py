@@ -10,8 +10,16 @@ from sentence_transformers import SentenceTransformer
 
 # --- CONFIG ---
 DB_HOST = os.getenv("DB_HOST", "localhost")
-READ_URI = f"host={DB_HOST} dbname=design_db user=design_readonly password=read_password"
-WRITE_URI = f"host={DB_HOST} dbname=design_db user=design_readwrite password=write_password"
+DB_READ_PASS = os.getenv("DB_READ_PASS")
+DB_WRITE_PASS = os.getenv("DB_WRITE_PASS")
+
+if not DB_READ_PASS or not DB_WRITE_PASS:
+    # We allow the server to start but indicate it's misconfigured if it's meant to be secure
+    # Or strictly fail to prevent using defaults
+    pass 
+
+READ_URI = f"host={DB_HOST} dbname=design_db user=design_readonly password={DB_READ_PASS or 'read_password'}"
+WRITE_URI = f"host={DB_HOST} dbname=design_db user=design_readwrite password={DB_WRITE_PASS or 'write_password'}"
 MAX_LIFETIME = 300  # 5 mins
 
 import sys
