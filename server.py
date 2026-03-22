@@ -149,6 +149,9 @@ async def summarize_and_cleanup(project: str, ids_to_summarize: list[str], summa
     """Merges multiple UUIDv7 notes into one summary and deletes originals."""
     limiter.check("summarize")
 
+    if not ids_to_summarize:
+        return "Error: No IDs provided to summarize."
+
     text_to_embed = f"{new_title}\n{summary_text}"
     model = get_embedding_model()
     vector = await asyncio.to_thread(model.encode, text_to_embed)
@@ -190,7 +193,19 @@ async def run_smart_cleanup() -> str:
             """)
             expired = await cur.fetchall()
     if not expired: return "💚 All projects are within their retention limits."
-    return "🚨 Ready for cleanup:\n" + "\n".join([f"- {i['project_name']}: {i['expired_count']} notes" for i in expired])
+    
+    # Execute actual deletion
+    async with write_pool.connection() as conn:
+        await conn.execute("""
+            DELETE FROM design_cache c
+            USING retention_policies p
+            WHERE c.project_name = p.project_name
+            AND c.cache_type = 'idea' 
+            AND p.days_to_retain > 0
+            AND c.created_at < NOW() - (p.days_to_retain || ' days')::interval
+        """)
+        
+    return "🚨 Cleanup complete! Deleted expired notes:\n" + "\n".join([f"- {i['project_name']}: {i['expired_count']} notes" for i in expired])
 
 @mcp.tool()
 async def health_check():
@@ -264,9 +279,11 @@ async def export_project_to_markdown(project: str) -> str:
 
     full_text = "\n".join(md)
 
-    # Optional: Save to a local file (requires volume mapping in Docker)
-    # with open(f"/app/exports/{project}_history.md", "w") as f:
-    #     f.write(full_text)
+    if len(rows) > 20:
+        filepath = os.path.abspath(f"/tmp/{project}_history.md")
+        with open(filepath, "w") as f:
+            f.write(full_text)
+        return f"✅ Export successful. Total entries: {len(rows)}.\n\nContent too large for MCP response. Saved locally to: {filepath}"
 
     return f"✅ Export successful. Total entries: {len(rows)}.\n\n" + full_text
 
@@ -357,6 +374,22 @@ Chosen Option: **[AI: Please specify based on our chat]**
 ## Validation
 [AI: Define how we verify this architectural change]
 """
+
+    new_title = f"{record['title']} [ADR status: {status.upper()}]"
+    model = get_embedding_model()
+    vector = await asyncio.to_thread(model.encode, f"{new_title}\n{adr_content}")
+    vector_list = vector.tolist()
+
+    async with write_pool.connection() as conn:
+        await conn.execute("""
+            UPDATE design_cache
+            SET title = %s,
+                content = %s,
+                cache_type = 'project',
+                embedding = %s::vector
+            WHERE id = %s
+        """, (new_title, adr_content, vector_list, idea_id))
+        
     return adr_content
 
 @mcp.tool()

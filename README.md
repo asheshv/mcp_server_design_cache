@@ -64,6 +64,10 @@ Running the Python server locally allows the AI to natively read and write to yo
    }
    ```
 
+## 📖 Usage Examples
+
+Check out the [examples/usage.md](examples/usage.md) file to see how AI agents interact with the cache during brainstorming, context retrieval, and decision formalization.
+
 ## 🔧 Available Tools
 - **search_design**: Finds relevant snippet abstracts using keyword/full-text search.
 - **expand_design_note**: Retrieves the full, unabridged text for a specific cached idea.
