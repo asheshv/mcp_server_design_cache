@@ -143,6 +143,78 @@ async def store_note(project: str, title: str, content: str, cache_type: str = '
         )
     return "Decision cached successfully."
 
+@mcp.tool()
+async def update_note(cache_id: str, title: str | None = None, content: str | None = None, cache_type: str | None = None) -> str:
+    """
+    Updates an existing design note by ID.
+    Only the fields you provide will be changed. Re-generates the embedding
+    if title or content changes so semantic search stays accurate.
+    """
+    limiter.check("update")
+
+    if not any([title, content, cache_type]):
+        return "Error: Provide at least one field to update (title, content, or cache_type)."
+
+    # Fetch the current record so we can fill in unchanged fields for re-embedding
+    async with read_pool.connection() as conn:
+        async with conn.cursor(row_factory=dict_row) as cur:
+            await cur.execute(
+                "SELECT title, content, cache_type FROM design_cache WHERE id = %s",
+                (cache_id,)
+            )
+            row = await cur.fetchone()
+
+    if not row:
+        return f"Error: No design note found with ID '{cache_id}'."
+
+    new_title   = title      if title      is not None else row["title"]
+    new_content = content    if content    is not None else row["content"]
+    new_type    = cache_type if cache_type is not None else row["cache_type"]
+
+    # Re-embed only when text actually changed
+    vector_list = None
+    if title is not None or content is not None:
+        model = get_embedding_model()
+        vector = await asyncio.to_thread(model.encode, f"{new_title}\n{new_content}")
+        vector_list = vector.tolist()
+
+    async with write_pool.connection() as conn:
+        if vector_list is not None:
+            await conn.execute(
+                """UPDATE design_cache
+                   SET title = %s, content = %s, cache_type = %s, embedding = %s::vector
+                   WHERE id = %s""",
+                (new_title, new_content, new_type, vector_list, cache_id)
+            )
+        else:
+            await conn.execute(
+                "UPDATE design_cache SET cache_type = %s WHERE id = %s",
+                (new_type, cache_id)
+            )
+
+    return f"✅ Note '{cache_id}' updated successfully."
+
+@mcp.tool()
+async def delete_note(cache_id: str) -> str:
+    """
+    Permanently deletes a specific design note by its ID.
+    This action is irreversible — use summarize_and_cleanup for bulk archiving instead.
+    """
+    limiter.check("delete")
+
+    async with write_pool.connection() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                "DELETE FROM design_cache WHERE id = %s RETURNING id",
+                (cache_id,)
+            )
+            deleted = await cur.fetchone()
+
+    if not deleted:
+        return f"Error: No design note found with ID '{cache_id}'. Nothing was deleted."
+
+    return f"🗑️ Note '{cache_id}' permanently deleted."
+
 # --- MAINTENANCE & CLEANUP TOOLS ---
 @mcp.tool()
 async def summarize_and_cleanup(project: str, ids_to_summarize: list[str], summary_text: str, new_title: str):
@@ -193,18 +265,18 @@ async def run_smart_cleanup() -> str:
             """)
             expired = await cur.fetchall()
     if not expired: return "💚 All projects are within their retention limits."
-    
+
     # Execute actual deletion
     async with write_pool.connection() as conn:
         await conn.execute("""
             DELETE FROM design_cache c
             USING retention_policies p
             WHERE c.project_name = p.project_name
-            AND c.cache_type = 'idea' 
+            AND c.cache_type = 'idea'
             AND p.days_to_retain > 0
             AND c.created_at < NOW() - (p.days_to_retain || ' days')::interval
         """)
-        
+
     return "🚨 Cleanup complete! Deleted expired notes:\n" + "\n".join([f"- {i['project_name']}: {i['expired_count']} notes" for i in expired])
 
 @mcp.tool()
@@ -389,7 +461,7 @@ Chosen Option: **[AI: Please specify based on our chat]**
                 embedding = %s::vector
             WHERE id = %s
         """, (new_title, adr_content, vector_list, idea_id))
-        
+
     return adr_content
 
 @mcp.tool()

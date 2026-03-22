@@ -1,8 +1,8 @@
 # TODO
 
 ## Features
-- [ ] Add `update_note` tool to seamlessly edit existing cache content.
-- [ ] Add `delete_note` tool allowing agents to permanently delete specific cache IDs.
+- [x] Add `update_note` tool to seamlessly edit existing cache content.
+- [x] Add `delete_note` tool allowing agents to permanently delete specific cache IDs.
 - [ ] Implement pagination and offset parameters for `search_design` and `get_recent_activity`.
 - [ ] Add an explicit `tags[]` array column to notes for better categorization.
 - [ ] Add `get_retention_policies` tool so agents can read active cleanup rules for a project.

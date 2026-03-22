@@ -383,6 +383,75 @@ class TestMCPTools(unittest.IsolatedAsyncioTestCase):
             os.unlink(filepath)
 
     # ------------------------------------------------------------------
+    # update_note
+    # ------------------------------------------------------------------
+    async def test_update_note_content_change_re_embeds(self):
+        """Changing content should trigger a re-embedding and full UPDATE."""
+        existing = {"title": "Old Title", "content": "Old content", "cache_type": "idea"}
+        read_pool, _, _ = make_pool_mock(fetchone_row=existing)
+        write_pool, _, _ = make_pool_mock()
+        model_mock = make_embedding_mock()
+
+        async def fake_to_thread(fn, *args):
+            return model_mock.encode(*args)
+
+        with patch("server.read_pool", read_pool), \
+             patch("server.write_pool", write_pool), \
+             patch("server.get_embedding_model", return_value=model_mock), \
+             patch("asyncio.to_thread", side_effect=fake_to_thread):
+            result = await server.update_note("some-id", content="New content")
+
+        self.assertIn("updated successfully", result)
+        # Confirm the write pool's execute was called (full update with embedding)
+        write_pool.connection().__aenter__.return_value.execute.assert_called_once()
+
+    async def test_update_note_type_only_skips_embedding(self):
+        """Changing only cache_type should NOT trigger re-embedding."""
+        existing = {"title": "Title", "content": "Content", "cache_type": "idea"}
+        read_pool, _, _ = make_pool_mock(fetchone_row=existing)
+        write_pool, _, _ = make_pool_mock()
+
+        with patch("server.read_pool", read_pool), \
+             patch("server.write_pool", write_pool):
+            result = await server.update_note("some-id", cache_type="project")
+
+        self.assertIn("updated successfully", result)
+
+    async def test_update_note_no_fields_returns_error(self):
+        """Calling update_note with no fields should return a validation error."""
+        result = await server.update_note("some-id")
+        self.assertIn("Error", result)
+        self.assertIn("at least one field", result)
+
+    async def test_update_note_not_found(self):
+        """update_note should return an error when the ID doesn't exist."""
+        pool, _, _ = make_pool_mock(fetchone_row=None)
+        with patch("server.read_pool", pool):
+            result = await server.update_note("nonexistent-id", title="New Title")
+        self.assertIn("Error", result)
+        self.assertIn("nonexistent-id", result)
+
+    # ------------------------------------------------------------------
+    # delete_note
+    # ------------------------------------------------------------------
+    async def test_delete_note_success(self):
+        """delete_note should confirm deletion when RETURNING returns the ID."""
+        # fetchone simulates RETURNING id returning a row
+        write_pool, _, cur = make_pool_mock(fetchone_row=("deleted-id",))
+        with patch("server.write_pool", write_pool):
+            result = await server.delete_note("deleted-id")
+        self.assertIn("deleted", result.lower())
+        self.assertIn("deleted-id", result)
+
+    async def test_delete_note_not_found(self):
+        """delete_note should return an error when the ID doesn't exist."""
+        write_pool, _, _ = make_pool_mock(fetchone_row=None)
+        with patch("server.write_pool", write_pool):
+            result = await server.delete_note("nonexistent-id")
+        self.assertIn("Error", result)
+        self.assertIn("nonexistent-id", result)
+
+    # ------------------------------------------------------------------
     # RateLimiter
     # ------------------------------------------------------------------
     def test_rate_limiter_allows_under_limit(self):
