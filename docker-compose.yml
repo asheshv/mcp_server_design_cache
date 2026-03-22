@@ -1,0 +1,36 @@
+services:
+  mcp_db:
+    image: pgvector/pgvector:pg18
+    container_name: mcp_postgres
+    environment:
+      POSTGRES_DB: design_db
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: superpassword
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d design_db"]
+      interval: 5s
+      retries: 5
+
+  mcp-server:
+    build: .
+    container_name: mcp_server
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      - DB_HOST=mcp_db
+    stdin_open: true
+    tty: true
+
+volumes:
+  postgres_data:
+
+deploy:
+  resources:
+    limits:
+      memory: 768M # Keep the DB lean and fast
