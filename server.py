@@ -27,6 +27,19 @@ def get_embedding_model():
         sys.stdout = _stdout
     return embedding_model
 
+def get_local_project_name():
+    """Attempts to read the project name from a local .design_cache file."""
+    try:
+        # Check current working directory
+        path = os.path.join(os.getcwd(), ".design_cache")
+        if os.path.exists(path):
+            with open(path, "r") as f:
+                name = f.readline().strip()
+                if name: return name
+    except Exception:
+        pass
+    return None
+
 # --- CONNECTION POOL WITH PGVECTOR CONFIG ---
 async def configure_db(conn):
     """Ensures every pooled connection supports pgvector and UUIDv7."""
@@ -35,10 +48,44 @@ async def configure_db(conn):
 read_pool = AsyncConnectionPool(conninfo=READ_URI, open=False, configure=configure_db)
 write_pool = AsyncConnectionPool(conninfo=WRITE_URI, open=False, configure=configure_db)
 
+# --- SCHEMA MIGRATIONS ---
+MIGRATIONS = {
+    1: """
+    ALTER TABLE design_cache ADD COLUMN IF NOT EXISTS tags TEXT[];
+    CREATE INDEX IF NOT EXISTS idx_tags ON design_cache USING GIN(tags);
+    """
+}
+
+async def apply_migrations():
+    """Ensures the database schema is up-to-date by running missing scripts in order."""
+    async with write_pool.connection() as conn:
+        async with conn.cursor() as cur:
+            # Create schema_version table if missing (bootstrapping)
+            await cur.execute("""
+                CREATE TABLE IF NOT EXISTS schema_version (
+                    version INTEGER PRIMARY KEY,
+                    applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            # Get current version
+            await cur.execute("SELECT MAX(version) FROM schema_version")
+            row = await cur.fetchone()
+            current_v = row[0] if row and row[0] is not None else 0
+
+            # Run missing migrations
+            for v in sorted(MIGRATIONS.keys()):
+                if v > current_v:
+                    print(f"--- Applying Database Migration v{v} ---")
+                    await cur.execute(MIGRATIONS[v])
+                    await cur.execute("INSERT INTO schema_version (version) VALUES (%s)", (v,))
+    print("💚 Database schema is up-to-date.")
+
 @asynccontextmanager
 async def app_lifespan(server: FastMCP):
     await read_pool.open()
     await write_pool.open()
+    # Run migrations once pools are ready
+    await apply_migrations()
     try:
         yield
     finally:
@@ -66,10 +113,11 @@ limiter = RateLimiter(60)
 
 # --- SEARCH TOOLS ---
 @mcp.tool()
-async def search_design(project: str, query: str) -> str:
+async def search_design(project: str, query: str, limit: int = 5, offset: int = 0, tags: list[str] | None = None) -> str:
     """
     Performs Hybrid Search: Keywords (FTS) + Semantic (Vector).
-    Returns the top 5 most relevant design notes.
+    Supports pagination (limit/offset) and optional tag intersection filtering.
+    Returns the top matches.
     """
     limiter.check("search")
 
@@ -78,32 +126,42 @@ async def search_design(project: str, query: str) -> str:
     query_vector = await asyncio.to_thread(model.encode, query)
     query_vector_list = query_vector.tolist()
 
+    tag_filter = ""
+    params = [query, query_vector_list, project, query, query_vector_list, query, query_vector_list]
+    
+    if tags:
+        tag_filter = "AND tags @> %s"
+        params.append(tags)
+    
+    params.extend([limit, offset])
+
     async with read_pool.connection() as conn:
         async with conn.cursor(row_factory=dict_row) as cur:
             # We use Reciprocal Rank Fusion (RRF) logic or simple weighted sum
-            # Postgres 18 handles this complex ranking with sub-millisecond latency
-            await cur.execute("""
-                SELECT title, content, cache_type, id,
+            await cur.execute(f"""
+                SELECT title, content, cache_type, id, tags,
                        ts_rank(search_vector, plainto_tsquery('english', %s)) as keyword_score,
                        COALESCE((1 - (embedding <=> %s::vector)), 0) as semantic_score
                 FROM design_cache
                 WHERE project_name = %s
+                {tag_filter}
                 AND (
                     search_vector @@ plainto_tsquery('english', %s)
                     OR embedding <=> %s::vector < 0.6
                 )
                 ORDER BY (ts_rank(search_vector, plainto_tsquery('english', %s)) + COALESCE((1 - (embedding <=> %s::vector)), 0)) DESC
-                LIMIT 5;
-            """, (query, query_vector_list, project, query, query_vector_list, query, query_vector_list))
+                LIMIT %s OFFSET %s;
+            """, tuple(params))
             rows = await cur.fetchall()
 
     if not rows:
         return "No relevant design notes found."
 
-    output = [f"--- Found {len(rows)} matches. Use 'expand_design_note' to read full details. ---"]
+    output = [f"--- Found {len(rows)} matches (Offset: {offset}). Use 'expand_design_note' to read full details. ---"]
     for r in rows:
+        tag_str = f" [Tags: {', '.join(r['tags'])}]" if r.get('tags') else ""
         abstract = r['content'][:250].replace('\n', ' ') + "..." if len(r['content']) > 250 else r['content']
-        output.append(f"[{r['cache_type'].upper()} ID:{r['id']}] {r['title']}\nAbstract: {abstract}")
+        output.append(f"[{r['cache_type'].upper()} ID:{r['id']}] {r['title']}{tag_str}\nAbstract: {abstract}")
 
     return "\n\n".join(output)
 
@@ -127,8 +185,8 @@ async def expand_design_note(cache_id: str) -> str:
 
 # --- STORAGE TOOLS ---
 @mcp.tool()
-async def store_note(project: str, title: str, content: str, cache_type: str = 'idea'):
-    """Stores persistent design context using native Postgres 18 UUIDv7."""
+async def store_note(project: str, title: str, content: str, cache_type: str = 'idea', tags: list[str] | None = None):
+    """Stores persistent design context using native Postgres 18 UUIDv7. Supports optional tags."""
     limiter.check("store")
 
     text_to_embed = f"{title}\n{content}"
@@ -138,13 +196,13 @@ async def store_note(project: str, title: str, content: str, cache_type: str = '
 
     async with write_pool.connection() as conn:
         await conn.execute(
-            "INSERT INTO design_cache (project_name, title, content, cache_type, embedding) VALUES (%s, %s, %s, %s, %s::vector)",
-            (project, title, content, cache_type, vector_list)
+            "INSERT INTO design_cache (project_name, title, content, cache_type, embedding, tags) VALUES (%s, %s, %s, %s, %s::vector, %s)",
+            (project, title, content, cache_type, vector_list, tags)
         )
     return "Decision cached successfully."
 
 @mcp.tool()
-async def update_note(cache_id: str, title: str | None = None, content: str | None = None, cache_type: str | None = None) -> str:
+async def update_note(cache_id: str, title: str | None = None, content: str | None = None, cache_type: str | None = None, tags: list[str] | None = None) -> str:
     """
     Updates an existing design note by ID.
     Only the fields you provide will be changed. Re-generates the embedding
@@ -152,14 +210,14 @@ async def update_note(cache_id: str, title: str | None = None, content: str | No
     """
     limiter.check("update")
 
-    if not any([title, content, cache_type]):
-        return "Error: Provide at least one field to update (title, content, or cache_type)."
+    if not any([title, content, cache_type, tags]):
+        return "Error: Provide at least one field to update (title, content, cache_type, or tags)."
 
     # Fetch the current record so we can fill in unchanged fields for re-embedding
     async with read_pool.connection() as conn:
         async with conn.cursor(row_factory=dict_row) as cur:
             await cur.execute(
-                "SELECT title, content, cache_type FROM design_cache WHERE id = %s",
+                "SELECT title, content, cache_type, tags FROM design_cache WHERE id = %s",
                 (cache_id,)
             )
             row = await cur.fetchone()
@@ -170,6 +228,7 @@ async def update_note(cache_id: str, title: str | None = None, content: str | No
     new_title   = title      if title      is not None else row["title"]
     new_content = content    if content    is not None else row["content"]
     new_type    = cache_type if cache_type is not None else row["cache_type"]
+    new_tags    = tags       if tags       is not None else row["tags"]
 
     # Re-embed only when text actually changed
     vector_list = None
@@ -182,14 +241,14 @@ async def update_note(cache_id: str, title: str | None = None, content: str | No
         if vector_list is not None:
             await conn.execute(
                 """UPDATE design_cache
-                   SET title = %s, content = %s, cache_type = %s, embedding = %s::vector
+                   SET title = %s, content = %s, cache_type = %s, tags = %s, embedding = %s::vector
                    WHERE id = %s""",
-                (new_title, new_content, new_type, vector_list, cache_id)
+                (new_title, new_content, new_type, new_tags, vector_list, cache_id)
             )
         else:
             await conn.execute(
-                "UPDATE design_cache SET cache_type = %s WHERE id = %s",
-                (new_type, cache_id)
+                "UPDATE design_cache SET cache_type = %s, tags = %s WHERE id = %s",
+                (new_type, new_tags, cache_id)
             )
 
     return f"✅ Note '{cache_id}' updated successfully."
@@ -251,6 +310,30 @@ async def set_retention_policy(project: str, days: int, auto_compress: bool = Tr
     return f"Policy set: {days} days for {project}."
 
 @mcp.tool()
+async def get_retention_policies(project: str | None = None) -> str:
+    """
+    Retrieves the active retention policies.
+    If project is provided, returns only that policy. Otherwise returns all.
+    """
+    async with read_pool.connection() as conn:
+        async with conn.cursor(row_factory=dict_row) as cur:
+            if project:
+                await cur.execute("SELECT * FROM retention_policies WHERE project_name = %s", (project,))
+            else:
+                await cur.execute("SELECT * FROM retention_policies ORDER BY project_name")
+            rows = await cur.fetchall()
+
+    if not rows:
+        return "No retention policies found."
+
+    output = ["--- Active Retention Policies ---"]
+    for r in rows:
+        status = "Auto-Compress" if r['auto_compress'] else "Hard Delete"
+        output.append(f"- {r['project_name']}: {r['days_to_retain']} days ({status})")
+
+    return "\n".join(output)
+
+@mcp.tool()
 async def run_smart_cleanup() -> str:
     """Scans all projects for expired notes based on individual retention policies."""
     async with read_pool.connection() as conn:
@@ -287,31 +370,31 @@ async def health_check():
     return "💚 Healthy. Connection pools and pgvector active."
 
 @mcp.tool()
-async def get_recent_activity(project: str, limit: int = 5) -> str:
+async def get_recent_activity(project: str, limit: int = 5, offset: int = 0) -> str:
     """
     Retrieves the most recent design notes and decisions for a project.
-    Use this at the start of a session to get up to speed quickly.
+    Supports pagination (limit/offset). Use this at the start of a session.
     """
     limiter.check("activity")
     async with read_pool.connection() as conn:
         async with conn.cursor(row_factory=dict_row) as cur:
             # UUIDv7 is time-sortable, so this query is extremely efficient
             await cur.execute("""
-                SELECT id, title, content, cache_type, created_at
+                SELECT id, title, content, cache_type, created_at, tags
                 FROM design_cache
                 WHERE project_name = %s
-                ORDER BY id DESC LIMIT %s;
-            """, (project, limit))
+                ORDER BY id DESC LIMIT %s OFFSET %s;
+            """, (project, limit, offset))
             rows = await cur.fetchall()
 
     if not rows:
-        return f"No recent activity found for project '{project}'."
+        return f"No recent activity found for project '{project}' (Offset: {offset})."
 
-    output = [f"--- Recent Activity for {project} (Top {len(rows)}) ---"]
+    output = [f"--- Recent Activity for {project} (Top {len(rows)}, Offset: {offset}) ---"]
     for r in rows:
-        # Format timestamp to be readable
         ts = r['created_at'].strftime("%Y-%m-%d %H:%M")
-        output.append(f"[{ts}] [{r['cache_type'].upper()}] {r['title']}\n{r['content']}")
+        tag_str = f" [Tags: {', '.join(r['tags'])}]" if r.get('tags') else ""
+        output.append(f"[{ts}] [{r['cache_type'].upper()}] {r['title']}{tag_str}\n{r['content']}")
 
     return "\n\n".join(output)
 
@@ -542,6 +625,59 @@ async def read_external_doc(path: str) -> str:
         return content
     except Exception as e:
         return f"Error reading file: {str(e)}"
+
+@mcp.tool()
+async def get_project_context() -> str:
+    """
+    Detects the current project and returns its status, last 3 ideas, and common tags.
+    Use this at the start of a session to instantly sync with the local workspace.
+    """
+    project = get_local_project_name()
+    if not project:
+        return "No local .design_cache project file found. Use 'store_note' to start a project or create a .design_cache file."
+
+    async with read_pool.connection() as conn:
+        async with conn.cursor(row_factory=dict_row) as cur:
+            # Get last 3 ideas
+            await cur.execute("""
+                SELECT id, title, created_at, tags 
+                FROM design_cache 
+                WHERE project_name = %s 
+                ORDER BY id DESC LIMIT 3
+            """, (project,))
+            notes = await cur.fetchall()
+
+            # Get top 5 tags
+            await cur.execute("""
+                SELECT unnest(tags) as tag, count(*) as count
+                FROM design_cache
+                WHERE project_name = %s
+                GROUP BY tag ORDER BY count DESC LIMIT 5
+            """, (project,))
+            tags = await cur.fetchall()
+
+    res = [f"--- Project Context: {project} ---"]
+    if notes:
+        res.append("Recent Ideas:")
+        for n in notes:
+            t = n['created_at'].strftime("%Y-%m-%d")
+            res.append(f"- [{t}] {n['title']} (ID: {n['id']})")
+    else:
+        res.append("No notes found for this project yet.")
+
+    if tags:
+        res.append(f"Top Tags: {', '.join([t['tag'] for t in tags])}")
+
+    return "\n".join(res)
+
+@mcp.prompt()
+def onboard():
+    """Instructions for the AI to initialize a session for the current workspace."""
+    project = get_local_project_name()
+    if project:
+        return f"Please call 'get_project_context' to see the recent state of project '{project}'. Then, summarize the top 3 items and ask the user if they'd like to continue work on any of them or start something new."
+    else:
+        return "I couldn't detect a local project name. Please ask the user which project they are working on, or suggest they create a .design_cache file with the project name."
 
 if __name__ == "__main__":
     mcp.run()
