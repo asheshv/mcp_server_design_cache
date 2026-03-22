@@ -61,7 +61,7 @@ async def search_design(project: str, query: str) -> str:
     Returns the top 5 most relevant design notes.
     """
     limiter.check("search")
-    
+
     # 1. Get embedding for the query string using sentence-transformers
     query_vector = await asyncio.to_thread(embedding_model.encode, query)
     query_vector_list = query_vector.tolist()
@@ -73,25 +73,25 @@ async def search_design(project: str, query: str) -> str:
             await cur.execute("""
                 SELECT title, content, cache_type, id,
                        ts_rank(search_vector, plainto_tsquery('english', %s)) as keyword_score,
-                       (1 - (embedding <=> %s::vector)) as semantic_score
-                FROM design_cache 
-                WHERE project_name = %s 
+                       COALESCE((1 - (embedding <=> %s::vector)), 0) as semantic_score
+                FROM design_cache
+                WHERE project_name = %s
                 AND (
                     search_vector @@ plainto_tsquery('english', %s)
                     OR embedding <=> %s::vector < 0.6
                 )
-                ORDER BY (ts_rank(search_vector, plainto_tsquery('english', %s)) + (1 - (embedding <=> %s::vector))) DESC 
+                ORDER BY (ts_rank(search_vector, plainto_tsquery('english', %s)) + COALESCE((1 - (embedding <=> %s::vector)), 0)) DESC
                 LIMIT 5;
             """, (query, query_vector_list, project, query, query_vector_list, query, query_vector_list))
             rows = await cur.fetchall()
-    
+
     if not rows:
         return "No relevant design notes found."
 
     output = [f"--- Found {len(rows)} matches for project: {project} ---"]
     for r in rows:
         output.append(f"[{r['cache_type'].upper()} ID:{r['id']}] {r['title']}\n{r['content']}")
-    
+
     return "\n\n".join(output)
 
 # --- STORAGE TOOLS ---
@@ -99,14 +99,14 @@ async def search_design(project: str, query: str) -> str:
 async def store_note(project: str, title: str, content: str, cache_type: str = 'idea'):
     """Stores persistent design context using native Postgres 18 UUIDv7."""
     limiter.check("store")
-    
+
     text_to_embed = f"{title}\n{content}"
     vector = await asyncio.to_thread(embedding_model.encode, text_to_embed)
     vector_list = vector.tolist()
-    
+
     async with write_pool.connection() as conn:
         await conn.execute(
-            "INSERT INTO design_cache (project_name, title, content, cache_type, embedding) VALUES (%s, %s, %s, %s, %s::vector)", 
+            "INSERT INTO design_cache (project_name, title, content, cache_type, embedding) VALUES (%s, %s, %s, %s, %s::vector)",
             (project, title, content, cache_type, vector_list)
         )
     return "Decision cached successfully."
@@ -116,12 +116,17 @@ async def store_note(project: str, title: str, content: str, cache_type: str = '
 async def summarize_and_cleanup(project: str, ids_to_summarize: list[str], summary_text: str, new_title: str):
     """Merges multiple UUIDv7 notes into one summary and deletes originals."""
     limiter.check("summarize")
+
+    text_to_embed = f"{new_title}\n{summary_text}"
+    vector = await asyncio.to_thread(embedding_model.encode, text_to_embed)
+    vector_list = vector.tolist()
+
     async with write_pool.connection() as conn:
         async with conn.cursor() as cur:
             await cur.execute("""
-                INSERT INTO design_cache (project_name, content, cache_type, title, summary_of_ids) 
-                VALUES (%s, %s, 'project', %s, %s)
-            """, (project, summary_text, new_title, ids_to_summarize))
+                INSERT INTO design_cache (project_name, content, cache_type, title, summary_of_ids, embedding)
+                VALUES (%s, %s, 'project', %s, %s, %s::vector)
+            """, (project, summary_text, new_title, ids_to_summarize, vector_list))
             await cur.execute("DELETE FROM design_cache WHERE id = ANY(%s)", (ids_to_summarize,))
     return f"Consolidated {len(ids_to_summarize)} notes into '{new_title}'."
 
@@ -130,9 +135,9 @@ async def set_retention_policy(project: str, days: int, auto_compress: bool = Tr
     """Sets a custom cleanup policy for a project (e.g., 7 days for 'Work')."""
     async with write_pool.connection() as conn:
         await conn.execute("""
-            INSERT INTO retention_policies (project_name, days_to_retain, auto_compress) 
+            INSERT INTO retention_policies (project_name, days_to_retain, auto_compress)
             VALUES (%s, %s, %s)
-            ON CONFLICT (project_name) DO UPDATE 
+            ON CONFLICT (project_name) DO UPDATE
             SET days_to_retain = EXCLUDED.days_to_retain, auto_compress = EXCLUDED.auto_compress
         """, (project, days, auto_compress))
     return f"Policy set: {days} days for {project}."
@@ -173,12 +178,12 @@ async def get_recent_activity(project: str, limit: int = 5) -> str:
             # UUIDv7 is time-sortable, so this query is extremely efficient
             await cur.execute("""
                 SELECT id, title, content, cache_type, created_at
-                FROM design_cache 
-                WHERE project_name = %s 
+                FROM design_cache
+                WHERE project_name = %s
                 ORDER BY id DESC LIMIT %s;
             """, (project, limit))
             rows = await cur.fetchall()
-    
+
     if not rows:
         return f"No recent activity found for project '{project}'."
 
@@ -187,7 +192,7 @@ async def get_recent_activity(project: str, limit: int = 5) -> str:
         # Format timestamp to be readable
         ts = r['created_at'].strftime("%Y-%m-%d %H:%M")
         output.append(f"[{ts}] [{r['cache_type'].upper()}] {r['title']}\n{r['content']}")
-    
+
     return "\n\n".join(output)
 
 # Inside server.py
@@ -195,7 +200,7 @@ async def get_recent_activity(project: str, limit: int = 5) -> str:
 @mcp.tool()
 async def export_project_to_markdown(project: str) -> str:
     """
-    Exports the entire design history for a specific project into 
+    Exports the entire design history for a specific project into
     a single, human-readable Markdown document.
     """
     limiter.check("export")
@@ -203,9 +208,9 @@ async def export_project_to_markdown(project: str) -> str:
         async with conn.cursor(row_factory=dict_row) as cur:
             # Fetch all notes, ordered by time (UUIDv7 naturally sorts this)
             await cur.execute("""
-                SELECT title, content, cache_type, created_at 
-                FROM design_cache 
-                WHERE project_name = %s 
+                SELECT title, content, cache_type, created_at
+                FROM design_cache
+                WHERE project_name = %s
                 ORDER BY id ASC
             """, (project,))
             rows = await cur.fetchall()
@@ -215,7 +220,7 @@ async def export_project_to_markdown(project: str) -> str:
 
     # Build the Markdown content
     md = [f"# Design History: {project}\n", f"Generated on: {time.strftime('%Y-%m-%d %H:%M:%S')}\n"]
-    
+
     for r in rows:
         ts = r['created_at'].strftime("%Y-%m-%d %H:%M")
         icon = "📌" if r['cache_type'] == 'project' else "💡"
@@ -225,7 +230,7 @@ async def export_project_to_markdown(project: str) -> str:
         md.append("---")
 
     full_text = "\n".join(md)
-    
+
     # Optional: Save to a local file (requires volume mapping in Docker)
     # with open(f"/app/exports/{project}_history.md", "w") as f:
     #     f.write(full_text)
@@ -242,7 +247,7 @@ async def generate_spec_from_cache(idea_id: str) -> str:
     async with read_pool.connection() as conn:
         async with conn.cursor(row_factory=dict_row) as cur:
             await cur.execute("""
-                SELECT title, content, project_name, created_at 
+                SELECT title, content, project_name, created_at
                 FROM design_cache WHERE id = %s
             """, (idea_id,))
             idea = await cur.fetchone()
@@ -281,7 +286,7 @@ async def generate_adr_from_cache(idea_id: str, status: str = "proposed") -> str
         async with conn.cursor(row_factory=dict_row) as cur:
             # UUIDv7 makes finding the specific discussion instant
             await cur.execute("""
-                SELECT title, content, project_name, created_at 
+                SELECT title, content, project_name, created_at
                 FROM design_cache WHERE id = %s
             """, (idea_id,))
             record = await cur.fetchone()
@@ -327,14 +332,28 @@ async def sync_doc_status(cache_id: str, file_path: str, status: str = "implemen
     Links a physical file (Spec/ADR) to a Cache entry and updates its status.
     Ensures the AI knows the 'Idea' has graduated to 'Official Doc'.
     """
+    async with read_pool.connection() as conn:
+        async with conn.cursor(row_factory=dict_row) as cur:
+            await cur.execute("SELECT title, content FROM design_cache WHERE id = %s", (cache_id,))
+            row = await cur.fetchone()
+
+    if not row: return f"Error: Cache ID {cache_id} not found."
+
+    new_title = f"{row['title']} [OFFICIAL: {status}]"
+    new_content = f"{row['content']}\n\nReference File: {file_path}"
+
+    vector = await asyncio.to_thread(embedding_model.encode, f"{new_title}\n{new_content}")
+    vector_list = vector.tolist()
+
     async with write_pool.connection() as conn:
         await conn.execute("""
-            UPDATE design_cache 
-            SET title = title || ' [OFFICIAL: ' || %s || ']',
-                content = content || '\n\nReference File: ' || %s,
-                cache_type = 'project' -- Promote to Project level
+            UPDATE design_cache
+            SET title = %s,
+                content = %s,
+                cache_type = 'project', -- Promote to Project level
+                embedding = %s::vector
             WHERE id = %s
-        """, (status, file_path, cache_id))
+        """, (new_title, new_content, vector_list, cache_id))
     return f"🔗 Linked Cache {cache_id} to {file_path} as {status}."
 
 # Tool to link an existing file to a Cache ID
@@ -346,17 +365,31 @@ async def link_external_file_to_cache(cache_id: str, file_path: str, category: s
     """
     if not os.path.isabs(file_path):
         return "Error: Please provide an absolute file path."
-    
+
     if not os.path.exists(file_path):
         return f"Error: File not found at {file_path}."
 
+    async with read_pool.connection() as conn:
+        async with conn.cursor(row_factory=dict_row) as cur:
+            await cur.execute("SELECT title, content FROM design_cache WHERE id = %s", (cache_id,))
+            row = await cur.fetchone()
+
+    if not row: return f"Error: Cache ID {cache_id} not found."
+
+    new_title = f"{row['title']} [LINKED {category.upper()}]"
+    new_content = f"{row['content']}\n\nLinked File: {file_path}"
+
+    vector = await asyncio.to_thread(embedding_model.encode, f"{new_title}\n{new_content}")
+    vector_list = vector.tolist()
+
     async with write_pool.connection() as conn:
         await conn.execute("""
-            UPDATE design_cache 
-            SET title = title || ' [LINKED ' || %s || ']',
-                content = content || '\n\nLinked File: ' || %s
+            UPDATE design_cache
+            SET title = %s,
+                content = %s,
+                embedding = %s::vector
             WHERE id = %s
-        """, (category.upper(), file_path, cache_id))
+        """, (new_title, new_content, vector_list, cache_id))
     return f"✅ Linked {category} at {file_path} to Cache ID {cache_id}."
 
 # Resource to let the AI "Load" and read the file content
