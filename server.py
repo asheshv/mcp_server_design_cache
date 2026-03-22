@@ -113,31 +113,40 @@ limiter = RateLimiter(60)
 
 # --- SEARCH TOOLS ---
 @mcp.tool()
-async def search_design(project: str, query: str, limit: int = 5, offset: int = 0, tags: list[str] | None = None) -> str:
+async def search_design(
+    project: str,
+    query: str,
+    limit: int = 5,
+    offset: int = 0,
+    tags: list[str] | None = None,
+    tag_logic: str = "AND"
+) -> str:
     """
     Performs Hybrid Search: Keywords (FTS) + Semantic (Vector).
-    Supports pagination (limit/offset) and optional tag intersection filtering.
-    Returns the top matches.
+    tag_logic: "AND" (has all), "OR" (has any), "NOT" (has none).
     """
     limiter.check("search")
 
-    # 1. Get embedding for the query string using sentence-transformers
     model = get_embedding_model()
     query_vector = await asyncio.to_thread(model.encode, query)
     query_vector_list = query_vector.tolist()
 
     tag_filter = ""
-    params = [query, query_vector_list, project, query, query_vector_list, query, query_vector_list]
-    
+    tag_params = []
     if tags:
-        tag_filter = "AND tags @> %s"
-        params.append(tags)
-    
-    params.extend([limit, offset])
+        if tag_logic.upper() == "OR":
+            tag_filter = "AND tags && %s::text[]"
+        elif tag_logic.upper() == "NOT":
+            tag_filter = "AND NOT (tags && %s::text[])"
+        else: # Default AND
+            tag_filter = "AND tags @> %s::text[]"
+        tag_params = [tags]
+
+    # Adjusted parameters to match the SQL query exactly
+    sql_params = [query, query_vector_list, project] + tag_params + [query, query_vector_list, query, query_vector_list, limit, offset]
 
     async with read_pool.connection() as conn:
         async with conn.cursor(row_factory=dict_row) as cur:
-            # We use Reciprocal Rank Fusion (RRF) logic or simple weighted sum
             await cur.execute(f"""
                 SELECT title, content, cache_type, id, tags,
                        ts_rank(search_vector, plainto_tsquery('english', %s)) as keyword_score,
@@ -151,7 +160,7 @@ async def search_design(project: str, query: str, limit: int = 5, offset: int = 
                 )
                 ORDER BY (ts_rank(search_vector, plainto_tsquery('english', %s)) + COALESCE((1 - (embedding <=> %s::vector)), 0)) DESC
                 LIMIT %s OFFSET %s;
-            """, tuple(params))
+            """, tuple(sql_params))
             rows = await cur.fetchall()
 
     if not rows:
@@ -370,21 +379,40 @@ async def health_check():
     return "💚 Healthy. Connection pools and pgvector active."
 
 @mcp.tool()
-async def get_recent_activity(project: str, limit: int = 5, offset: int = 0) -> str:
+async def get_recent_activity(
+    project: str,
+    limit: int = 5,
+    offset: int = 0,
+    tags: list[str] | None = None,
+    tag_logic: str = "AND"
+) -> str:
     """
     Retrieves the most recent design notes and decisions for a project.
-    Supports pagination (limit/offset). Use this at the start of a session.
+    tag_logic: "AND" (has all), "OR" (has any), "NOT" (has none).
     """
     limiter.check("activity")
     async with read_pool.connection() as conn:
         async with conn.cursor(row_factory=dict_row) as cur:
-            # UUIDv7 is time-sortable, so this query is extremely efficient
-            await cur.execute("""
+            tag_filter = ""
+            tag_params = []
+            if tags:
+                if tag_logic.upper() == "OR":
+                    tag_filter = "AND tags && %s::text[]"
+                elif tag_logic.upper() == "NOT":
+                    tag_filter = "AND NOT (tags && %s::text[])"
+                else: # Default AND
+                    tag_filter = "AND tags @> %s::text[]"
+                tag_params = [tags]
+
+            sql = f"""
                 SELECT id, title, content, cache_type, created_at, tags
                 FROM design_cache
                 WHERE project_name = %s
+                {tag_filter}
                 ORDER BY id DESC LIMIT %s OFFSET %s;
-            """, (project, limit, offset))
+            """
+            params = [project] + tag_params + [limit, offset]
+            await cur.execute(sql, params)
             rows = await cur.fetchall()
 
     if not rows:
@@ -640,9 +668,9 @@ async def get_project_context() -> str:
         async with conn.cursor(row_factory=dict_row) as cur:
             # Get last 3 ideas
             await cur.execute("""
-                SELECT id, title, created_at, tags 
-                FROM design_cache 
-                WHERE project_name = %s 
+                SELECT id, title, created_at, tags
+                FROM design_cache
+                WHERE project_name = %s
                 ORDER BY id DESC LIMIT 3
             """, (project,))
             notes = await cur.fetchall()

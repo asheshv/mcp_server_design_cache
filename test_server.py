@@ -83,6 +83,29 @@ class TestMCPTools(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Auth Design", result)
         self.assertIn("Tags: auth, security", result)
 
+    async def test_search_design_with_or_logic(self):
+        rows = [{"id": "1", "title": "Any", "content": "x", "cache_type": "idea", "tags": ["t1"]}]
+        pool, _, _ = make_pool_mock(rows=rows)
+        model_mock = make_embedding_mock()
+        async def fake_to_thread(fn, *args): return model_mock.encode(*args)
+        with patch("server.read_pool", pool), \
+             patch("server.get_embedding_model", return_value=model_mock), \
+             patch("asyncio.to_thread", side_effect=fake_to_thread):
+            result = await server.search_design("p", "q", tags=["t1", "t2"], tag_logic="OR")
+        self.assertIn("Any", result)
+
+    async def test_search_design_with_not_logic(self):
+        # We simulate that the DB returned something that didn't have the tags
+        rows = [{"id": "1", "title": "Safe", "content": "x", "cache_type": "idea", "tags": ["safe"]}]
+        pool, _, _ = make_pool_mock(rows=rows)
+        model_mock = make_embedding_mock()
+        async def fake_to_thread(fn, *args): return model_mock.encode(*args)
+        with patch("server.read_pool", pool), \
+             patch("server.get_embedding_model", return_value=model_mock), \
+             patch("asyncio.to_thread", side_effect=fake_to_thread):
+            result = await server.search_design("p", "q", tags=["bad"], tag_logic="NOT")
+        self.assertIn("Safe", result)
+
     async def test_search_design_no_results(self):
         pool, _, _ = make_pool_mock(rows=[])
         model_mock = make_embedding_mock()
@@ -243,6 +266,13 @@ class TestMCPTools(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Recent Note", result)
         self.assertIn("Offset: 2", result)
         self.assertIn("Tags: new", result)
+
+    async def test_get_recent_activity_with_not_logic(self):
+        rows = [{"id": "1", "title": "No Tags", "content": "x", "cache_type": "idea", "created_at": datetime.datetime(2026,3,22), "tags": []}]
+        pool, _, _ = make_pool_mock(rows=rows)
+        with patch("server.read_pool", pool):
+            result = await server.get_recent_activity("p", tags=["secret"], tag_logic="NOT")
+        self.assertIn("No Tags", result)
 
     async def test_get_recent_activity_empty(self):
         pool, _, _ = make_pool_mock(rows=[])

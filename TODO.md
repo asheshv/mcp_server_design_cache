@@ -1,14 +1,20 @@
-# TODO
+# MCP Server: Design Cache
 
-## Features
-- [x] Add `update_note` tool to seamlessly edit existing cache content.
-- [x] Add `delete_note` tool allowing agents to permanently delete specific cache IDs.
-- [x] Implement pagination and offset parameters for `search_design` and `get_recent_activity`.
-- [x] Add an explicit `tags[]` array column to notes for better categorization.
-- [x] Add `get_retention_policies` tool so agents can read active cleanup rules for a project.
+## Done ✅
+- [x] **Project Auto-Detection**: Added `.design_cache` local config support.
+- [x] **Onboarding Prompt**: Implemented `@mcp.prompt() onboard` for session initialization.
+- [x] **Project Context Tool**: Added `get_project_context` for instant status sync.
+- [x] **Pagination**: Added `limit` and `offset` to `search_design` and `get_recent_activity`.
+- [x] **Tags System**: Implemented `tags[]` array column and intersection filtering.
+- [x] **Robust Migrations**: Automated DB schema upgrades on startup via `MIGRATIONS`.
+- [x] **Retention Policy Retrieval**: Added `get_retention_policies` tool.
+- [x] **CRUD Tools**: Implemented `update_note` (with re-embedding) and `delete_note`.
+- [x] **Bug Fixes**: Cleanup query fixed, ADR status persistence added, and Export overflow handled.
 
-## Bugs
-- [x] Fix `run_smart_cleanup` to execute a `DELETE` query rather than just a dry-run `SELECT COUNT`.
-- [x] Add empty array validation in `summarize_and_cleanup` to prevent Postgres execution errors.
-- [x] Ensure `generate_adr_from_cache` actually persists the provided `status` parameter to the cache.
-- [x] Prevent LLM context overflow in `export_project_to_markdown` by forcing a file write for massive projects.
+## Upcoming / Ideas 💡
+- [x] **Tag Logic Expansion**: Support `OR` and `NOT` logic for tag search.
+- [ ] **Batch Storage**: Implement `batch_store_notes` for bulk data ingestion.
+- [ ] **Adaptive Compression**: Automate `summarize_and_cleanup` based on token usage patterns.
+- [ ] **Search Web Sync**: Tool to fetch external documentation and store in the cache directly.
+- [ ] **HNSW Indexing**: Explore HNSW for faster vector search on massive datasets.
+- [ ] **Export to PDF/DOCX**: Enhancing the project export tool.
