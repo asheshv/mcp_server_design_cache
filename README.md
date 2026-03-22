@@ -6,28 +6,34 @@ A high-performance Model Context Protocol (MCP) server acting as "external memor
 - **Token Efficiency**: Offloads design history to PostgreSQL so the AI only pulls what it needs.
 - **Hierarchical Caching**: Separate storage for high-level project goals and granular idea discussions.
 - **Full-Text Search (FTS)**: Sub-millisecond retrieval using Postgres GIN indexes.
-- **Secure by Design**: Role-Based Access Control (RBAC), SQL injection validation, and rate limiting (60 RPM).
+- **Semantic Vector Search**: Advanced context retrieval using local embeddings (`sentence-transformers`).
+- **Secure by Design**: Role-Based Access Control (RBAC), Parameterized Queries, and rate limiting (60 RPM).
 - **Modern Backend**: Built with Python Asyncio and Psycopg 3.
 
 ---
 
 ## 🛠️ Prerequisites
 - **Docker Desktop** (Recommended)
-- **Python 3.10+** (If running without Docker)
-- **PostgreSQL 15+** (If running without Docker)
+- **Python 3.13+** (If running without Docker)
+- **PostgreSQL 18+** (If running without Docker)
 
 ---
 
-## 📦 One-Click Deployment (Docker)
+## 📦 Local Deployment (Recommended)
 
-1. **Prepare Folder**: Ensure `server.py`, `init.sql`, `Dockerfile`, `requirements.txt`, and `docker-compose.yml` are in the same directory.
-2. **Launch Services**:
+Running the Python server locally allows the AI to natively read and write to your local file system (for linking markdown specs to the cache).
+
+1. **Run Setup Script**:
    ```bash
-   docker-compose up -d --build
+   chmod +x setup_local.sh
+   ./setup_local.sh
    ```
-3. **Verify Health**:
+   *(This starts the Postgres database in Docker, creates a Python `venv`, and installs dependencies including `sentence-transformers`.)*
+
+2. **Run Server**:
    ```bash
-   docker exec -it mcp_server python -c "import psycopg; print('Database Driver: Ready')"
+   source venv/bin/activate
+   DB_HOST=localhost python server.py
    ```
 
 ## 🤖 Configuring AI Agents
@@ -37,7 +43,7 @@ A high-performance Model Context Protocol (MCP) server acting as "external memor
    Add the server to your global MCP config:
 
    ```bash
-   claude mcp add design-cache --command docker --args ["exec", "-i", "mcp_server", "python", "server.py"]
+   claude mcp add design-cache --command /path/to/venv/bin/python --args ["/path/to/server.py"]
    ```
 
 2. **Cursor IDE / Windsurf**
@@ -45,20 +51,16 @@ A high-performance Model Context Protocol (MCP) server acting as "external memor
    - Go to **Settings > Features > MCP**.
    - Click + **Add new MCP server**.
    - **Name**: `design-cache` | **Type**: `stdio`.
-   - **Command**: `docker exec -i mcp_server python server.py`
+   - **Command**: `/path/to/venv/bin/python /path/to/server.py`
 
 3. **Claude Desktop (macOS/Windows)**
 
-   Edit your `claude_desktop_config.json`:
-   - **macOS**: `~/Library/Application Support/Claude/claude_desktop_config.json`
-   - **Windows**: `C:\Users\<username>\AppData\Roaming\Claude\claude_desktop_config.json`
-
-   Add this entry to your mcpServers list:
+   Edit your `claude_desktop_config.json` and add this entry to your mcpServers list:
 
    ```json
    "design-cache": {
-      "command": "docker",
-      "args": ["exec", "-i", "mcp_server", "python", "server.py"]
+      "command": "/path/to/venv/bin/python",
+      "args": ["/path/to/server.py"]
    }
    ```
 
@@ -70,6 +72,6 @@ A high-performance Model Context Protocol (MCP) server acting as "external memor
 
 ## 🛡️ Security Notes
 1. **Least Privilege**: Uses design_readonly for searches and design_readwrite for modifications.
-2. **SQL Sanitization**: All inputs scanned for patterns like UNION SELECT or ; DROP TABLE.
+2. **Parameterized Queries**: Uses `psycopg3` binding to natively prevent SQL injection without blocking valid markdown characters.
 3. **Rate Limiting**: Capped at 60 requests per minute.
 4. **Connection Lifecycle**: Connections recycled every 30 minutes via Psycopg 3.

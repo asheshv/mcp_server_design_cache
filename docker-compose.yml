@@ -20,7 +20,7 @@ services:
     build: .
     container_name: mcp_server
     depends_on:
-      db:
+      mcp_db:
         condition: service_healthy
     environment:
       - DB_HOST=mcp_db

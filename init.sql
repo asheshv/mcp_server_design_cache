@@ -14,8 +14,8 @@ CREATE TABLE IF NOT EXISTS design_cache (
     search_vector tsvector GENERATED ALWAYS AS (
         to_tsvector('english', coalesce(title, '') || ' ' || coalesce(content, ''))
     ) STORED,
-    -- Semantic Vector (1536 is standard for OpenAI/Ollama)
-    embedding vector(1536) 
+    -- Semantic Vector (384 is standard for all-MiniLM-L6-v2)
+    embedding vector(384) 
 );
 
 -- 3. High-Performance Indexes
@@ -43,4 +43,3 @@ GRANT CONNECT ON DATABASE design_db TO design_readonly, design_readwrite;
 GRANT USAGE ON SCHEMA public TO design_readonly, design_readwrite;
 GRANT SELECT ON design_cache, retention_policies TO design_readonly;
 GRANT ALL PRIVILEGES ON design_cache, retention_policies TO design_readwrite;
-GRANT USAGE, SELECT ON SEQUENCE design_cache_id_seq TO design_readwrite;
