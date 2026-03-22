@@ -88,3 +88,7 @@ Check out the [examples/usage.md](examples/usage.md) file to see how AI agents i
 3. **Parameterized Queries**: Uses `psycopg3` binding to natively prevent SQL injection without blocking valid markdown characters.
 4. **Rate Limiting**: Capped at 60 requests per minute.
 5. **Connection Lifecycle**: Connections recycled every 30 minutes via Psycopg 3.
+
+## 📄 License
+
+MIT License - See [LICENSE](LICENSE) for details.
