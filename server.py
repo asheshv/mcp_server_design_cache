@@ -707,5 +707,55 @@ def onboard():
     else:
         return "I couldn't detect a local project name. Please ask the user which project they are working on, or suggest they create a .design_cache file with the project name."
 
+@mcp.tool()
+async def get_compression_opportunities(project: str, char_limit: int = 5000) -> str:
+    """
+    Analyzes a project's notes and returns suggestions for summarization (compression).
+    Helps prevent LLM context overflow by identifying 'dense' clusters of notes.
+    """
+    async with read_pool.connection() as conn:
+        async with conn.cursor(row_factory=dict_row) as cur:
+            await cur.execute("""
+                SELECT id, title, length(content) as content_len, cache_type, tags
+                FROM design_cache
+                WHERE project_name = %s
+                ORDER BY id ASC
+            """, (project,))
+            notes = await cur.fetchall()
+
+    if not notes:
+        return f"No notes found for project '{project}' to analyze."
+
+    total_chars = sum(n['content_len'] for n in notes)
+    estimated_tokens = total_chars // 4 # Rough estimate
+
+    res = [f"--- Compression Analysis: {project} ---"]
+    res.append(f"Total Notes: {len(notes)}")
+    res.append(f"Estimated Context Size: ~{estimated_tokens} tokens ({total_chars} chars)")
+
+    if total_chars < char_limit:
+        res.append("✅ Context size is healthy. No immediate compression needed.")
+        return "\n".join(res)
+
+    res.append("⚠️ Context density is HIGH. Consider summarizing the following clusters:")
+
+    # Group by cache_type for suggestion clusters
+    by_type: dict[str, list[dict]] = defaultdict(list)
+    for n in notes:
+        by_type[n['cache_type']].append(n)
+
+    for ctype, cluster in by_type.items():
+        if len(cluster) >= 3:
+            ids = [n['id'] for n in cluster]
+            # cluster[:3] is safe here as cluster is a list[dict]
+            top_titles = [f"'{n['title']}'" for n in cluster[:3]]
+            cluster_titles = ", ".join(top_titles)
+            if len(cluster) > 3: cluster_titles += " ..."
+            res.append(f"\nCluster [{ctype.upper()}]: {len(cluster)} notes")
+            res.append(f"- Titles: {cluster_titles}")
+            res.append(f"- Suggested Action: Call 'summarize_and_cleanup' with IDs: {ids}")
+
+    return "\n".join(res)
+
 if __name__ == "__main__":
     mcp.run()

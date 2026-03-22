@@ -74,7 +74,7 @@ class TestMCPTools(unittest.IsolatedAsyncioTestCase):
 
         async def fake_to_thread(fn, *args):
             return model_mock.encode(*args)
-            
+
         with patch("server.read_pool", pool), \
              patch("server.get_embedding_model", return_value=model_mock), \
              patch("asyncio.to_thread", side_effect=fake_to_thread):
@@ -529,7 +529,7 @@ class TestMCPTools(unittest.IsolatedAsyncioTestCase):
         m = mock_open(read_data="test-project\n")
         rows_notes = [{"id": "1", "title": "Note 1", "created_at": datetime.datetime(2026,3,22), "tags": ["t1"]}]
         rows_tags = [{"tag": "t1", "count": 1}]
-        
+
         pool, _, cur = make_pool_mock()
         # Mocking fetchall to return different results for the two queries
         cur.fetchall.side_effect = [rows_notes, rows_tags]
@@ -538,7 +538,7 @@ class TestMCPTools(unittest.IsolatedAsyncioTestCase):
              patch("builtins.open", m), \
              patch("server.read_pool", pool):
             result = await server.get_project_context()
-            
+
         self.assertIn("Project Context: test-project", result)
         self.assertIn("Note 1", result)
         self.assertIn("Top Tags: t1", result)
@@ -572,6 +572,29 @@ class TestMCPTools(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(RuntimeError) as ctx:
             limiter.check("testtool")
         self.assertIn("Rate limit exceeded", str(ctx.exception))
+
+    # ------------------------------------------------------------------
+    # get_compression_opportunities
+    # ------------------------------------------------------------------
+    async def test_get_compression_opportunities_healthy(self):
+        rows = [{"id": "1", "title": "T1", "content_len": 100, "cache_type": "idea", "tags": []}]
+        pool, _, _ = make_pool_mock(rows=rows)
+        with patch("server.read_pool", pool):
+            result = await server.get_compression_opportunities("p1", char_limit=1000)
+        self.assertIn("healthy", result.lower())
+
+    async def test_get_compression_opportunities_high_density(self):
+        # 5 notes of 1000 chars each = 5000 chars total
+        rows = [
+            {"id": str(i), "title": f"T{i}", "content_len": 1000, "cache_type": "idea", "tags": []}
+            for i in range(5)
+        ]
+        pool, _, _ = make_pool_mock(rows=rows)
+        with patch("server.read_pool", pool):
+            result = await server.get_compression_opportunities("p1", char_limit=1000)
+        self.assertIn("HIGH", result)
+        self.assertIn("Cluster [IDEA]", result)
+        self.assertIn("'0', '1', '2'", result) # Snippet of IDs in suggestions
 
 
 if __name__ == "__main__":
