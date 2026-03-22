@@ -46,7 +46,7 @@ Running the Python server locally allows the AI to natively read and write to yo
    claude mcp add design-cache --command /path/to/venv/bin/python --args ["/path/to/server.py"]
    ```
 
-2. **Cursor IDE / Windsurf**
+2. **AntiGravity / Cursor / Windsurf**
 
    - Go to **Settings > Features > MCP**.
    - Click + **Add new MCP server**.
@@ -65,7 +65,8 @@ Running the Python server locally allows the AI to natively read and write to yo
    ```
 
 ## 🔧 Available Tools
-- **search_design**: Finds relevant snippets using keyword/full-text search.
+- **search_design**: Finds relevant snippet abstracts using keyword/full-text search.
+- **expand_design_note**: Retrieves the full, unabridged text for a specific cached idea.
 - **store_note**: Saves a new design decision or idea to the cache.
 - **summarize_and_cleanup**: Merges multiple ideas into a project-level summary.
 - **health_check**: Verifies the connection pool and database availability.

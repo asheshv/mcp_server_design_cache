@@ -1,5 +1,6 @@
 import aiofiles # Non-blocking file I/O for Python 3.13
 import os, time, re, asyncio, threading
+from contextlib import asynccontextmanager
 from collections import defaultdict
 from psycopg_pool import AsyncConnectionPool
 from psycopg.rows import dict_row
@@ -13,10 +14,18 @@ READ_URI = f"host={DB_HOST} dbname=design_db user=design_readonly password=read_
 WRITE_URI = f"host={DB_HOST} dbname=design_db user=design_readwrite password=write_password"
 MAX_LIFETIME = 300  # 5 mins
 
-mcp = FastMCP("SecureDesignMemory")
+import sys
+embedding_model = None
 
-# Load embedding model globally (downloads ~90MB on first run)
-embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
+def get_embedding_model():
+    global embedding_model
+    if embedding_model is None:
+        _stdout = sys.stdout
+        sys.stdout = sys.stderr
+        # Load embedding model lazily to prevent IDE timeout during MCP startup
+        embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
+        sys.stdout = _stdout
+    return embedding_model
 
 # --- CONNECTION POOL WITH PGVECTOR CONFIG ---
 async def configure_db(conn):
@@ -26,15 +35,17 @@ async def configure_db(conn):
 read_pool = AsyncConnectionPool(conninfo=READ_URI, open=False, configure=configure_db)
 write_pool = AsyncConnectionPool(conninfo=WRITE_URI, open=False, configure=configure_db)
 
-@mcp.on_startup()
-async def startup():
+@asynccontextmanager
+async def app_lifespan(server: FastMCP):
     await read_pool.open()
     await write_pool.open()
+    try:
+        yield
+    finally:
+        await read_pool.close()
+        await write_pool.close()
 
-@mcp.on_shutdown()
-async def shutdown():
-    await read_pool.close()
-    await write_pool.close()
+mcp = FastMCP("SecureDesignMemory", lifespan=app_lifespan)
 
 # --- SECURITY: RATE LIMITER ---
 class RateLimiter:
@@ -63,7 +74,8 @@ async def search_design(project: str, query: str) -> str:
     limiter.check("search")
 
     # 1. Get embedding for the query string using sentence-transformers
-    query_vector = await asyncio.to_thread(embedding_model.encode, query)
+    model = get_embedding_model()
+    query_vector = await asyncio.to_thread(model.encode, query)
     query_vector_list = query_vector.tolist()
 
     async with read_pool.connection() as conn:
@@ -88,11 +100,30 @@ async def search_design(project: str, query: str) -> str:
     if not rows:
         return "No relevant design notes found."
 
-    output = [f"--- Found {len(rows)} matches for project: {project} ---"]
+    output = [f"--- Found {len(rows)} matches. Use 'expand_design_note' to read full details. ---"]
     for r in rows:
-        output.append(f"[{r['cache_type'].upper()} ID:{r['id']}] {r['title']}\n{r['content']}")
+        abstract = r['content'][:250].replace('\n', ' ') + "..." if len(r['content']) > 250 else r['content']
+        output.append(f"[{r['cache_type'].upper()} ID:{r['id']}] {r['title']}\nAbstract: {abstract}")
 
     return "\n\n".join(output)
+
+@mcp.tool()
+async def expand_design_note(cache_id: str) -> str:
+    """
+    Retrieves the complete, unabridged content of a specific design note.
+    Use this after `search_design` to read the full details of a promising abstract.
+    """
+    limiter.check("expand")
+    async with read_pool.connection() as conn:
+        async with conn.cursor(row_factory=dict_row) as cur:
+            await cur.execute("SELECT title, content, cache_type, created_at, project_name FROM design_cache WHERE id = %s", (cache_id,))
+            row = await cur.fetchone()
+
+    if not row:
+        return f"Error: No design note found with ID '{cache_id}'"
+
+    ts = row['created_at'].strftime("%Y-%m-%d %H:%M:%S")
+    return f"--- {row['cache_type'].upper()} | Project: {row['project_name']} | Date: {ts} ---\n# {row['title']}\n\n{row['content']}"
 
 # --- STORAGE TOOLS ---
 @mcp.tool()
@@ -101,7 +132,8 @@ async def store_note(project: str, title: str, content: str, cache_type: str = '
     limiter.check("store")
 
     text_to_embed = f"{title}\n{content}"
-    vector = await asyncio.to_thread(embedding_model.encode, text_to_embed)
+    model = get_embedding_model()
+    vector = await asyncio.to_thread(model.encode, text_to_embed)
     vector_list = vector.tolist()
 
     async with write_pool.connection() as conn:
@@ -118,7 +150,8 @@ async def summarize_and_cleanup(project: str, ids_to_summarize: list[str], summa
     limiter.check("summarize")
 
     text_to_embed = f"{new_title}\n{summary_text}"
-    vector = await asyncio.to_thread(embedding_model.encode, text_to_embed)
+    model = get_embedding_model()
+    vector = await asyncio.to_thread(model.encode, text_to_embed)
     vector_list = vector.tolist()
 
     async with write_pool.connection() as conn:
@@ -342,7 +375,8 @@ async def sync_doc_status(cache_id: str, file_path: str, status: str = "implemen
     new_title = f"{row['title']} [OFFICIAL: {status}]"
     new_content = f"{row['content']}\n\nReference File: {file_path}"
 
-    vector = await asyncio.to_thread(embedding_model.encode, f"{new_title}\n{new_content}")
+    model = get_embedding_model()
+    vector = await asyncio.to_thread(model.encode, f"{new_title}\n{new_content}")
     vector_list = vector.tolist()
 
     async with write_pool.connection() as conn:
@@ -379,7 +413,8 @@ async def link_external_file_to_cache(cache_id: str, file_path: str, category: s
     new_title = f"{row['title']} [LINKED {category.upper()}]"
     new_content = f"{row['content']}\n\nLinked File: {file_path}"
 
-    vector = await asyncio.to_thread(embedding_model.encode, f"{new_title}\n{new_content}")
+    model = get_embedding_model()
+    vector = await asyncio.to_thread(model.encode, f"{new_title}\n{new_content}")
     vector_list = vector.tolist()
 
     async with write_pool.connection() as conn:
