@@ -5,6 +5,7 @@ Stores design conversations in a hierarchical structure backed by
 PostgreSQL + pgvector, enabling cross-session context and semantic search.
 """
 import aiofiles
+import hashlib
 import os
 import sys
 import time
@@ -74,9 +75,17 @@ VALID_TAG_LOGIC = {"AND", "OR", "NOT"}
 VALID_CACHE_TYPES = {"project", "idea"}
 VALID_ADR_STATUSES = {"proposed", "accepted", "superseded", "deprecated"}
 
-# --- EMBEDDING MODEL (async-safe lazy init: H-8, L-5, M-8) ---
+# --- EMBEDDING MODEL (async-safe lazy init: H-8, L-5, M-8, SP-06) ---
 _embedding_model = None
-_model_lock = asyncio.Lock()
+_model_lock: asyncio.Lock | None = None
+
+
+def _get_model_lock() -> asyncio.Lock:
+    """Lazily create the model lock to avoid binding to wrong event loop on Python 3.9."""
+    global _model_lock
+    if _model_lock is None:
+        _model_lock = asyncio.Lock()
+    return _model_lock
 
 
 async def get_embedding_model():
@@ -84,7 +93,7 @@ async def get_embedding_model():
     global _embedding_model
     if _embedding_model is not None:
         return _embedding_model
-    async with _model_lock:
+    async with _get_model_lock():
         if _embedding_model is not None:
             return _embedding_model
         _stdout = sys.stdout
@@ -99,12 +108,27 @@ async def get_embedding_model():
 
 
 def _sanitize_filename(name: str) -> str:
-    """Sanitize a string for safe use in file paths."""
-    return re.sub(r'[^a-zA-Z0-9_-]', '_', name)
+    """Sanitize a string for safe use in file paths.
+
+    Appends a short hash to prevent collisions between distinct names
+    that map to the same sanitized form (SP-08).
+    """
+    safe = re.sub(r'[^a-zA-Z0-9_-]', '_', name)
+    short_hash = hashlib.md5(name.encode()).hexdigest()[:8]
+    return f"{safe}_{short_hash}"
 
 
-def _validate_file_path(path: str) -> bool:
-    """Check that a resolved path is within allowed directories."""
+def _validate_file_path(path: str, reject_symlinks: bool = False) -> bool:
+    """Check that a resolved path is within allowed directories.
+
+    Args:
+        path: The file path to validate.
+        reject_symlinks: If True, reject paths that are symlinks to prevent
+            TOCTOU attacks where a symlink target is swapped between
+            validation and use (SP-03).
+    """
+    if reject_symlinks and os.path.islink(path):
+        return False
     resolved = os.path.realpath(path)
     return any(resolved.startswith(prefix) for prefix in ALLOWED_FILE_PREFIXES)
 
@@ -153,7 +177,10 @@ MIGRATIONS = {
     CREATE INDEX IF NOT EXISTS idx_project_name ON design_cache (project_name);
     """,
     4: """
-    ALTER TABLE design_cache ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT now();
+    ALTER TABLE design_cache ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT now();
+    UPDATE design_cache SET updated_at = created_at WHERE updated_at IS NULL;
+    ALTER TABLE design_cache ALTER COLUMN updated_at SET NOT NULL;
+    ALTER TABLE design_cache ALTER COLUMN updated_at SET DEFAULT now();
     """,
 }
 
@@ -880,9 +907,9 @@ async def link_external_file_to_cache(
     if not os.path.isabs(file_path):
         return "Error: Please provide an absolute file path."
 
-    # Validate path is within allowed directories (SEC-16, L-14)
-    if not _validate_file_path(file_path):
-        return "Error: File path is outside allowed directories."
+    # Validate path is within allowed directories; reject symlinks (SEC-16, L-14, SP-03)
+    if not _validate_file_path(file_path, reject_symlinks=True):
+        return "Error: File path is outside allowed directories or is a symlink."
 
     if not os.path.exists(file_path):
         return "Error: File not found at the specified path."

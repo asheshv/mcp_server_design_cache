@@ -56,10 +56,12 @@ GRANT USAGE ON SCHEMA public TO design_readonly, design_readwrite;
 GRANT SELECT ON design_cache, retention_policies TO design_readonly;
 GRANT ALL PRIVILEGES ON design_cache, retention_policies TO design_readwrite;
 
--- Future tables created in this schema inherit these grants (DB-009)
+-- Future tables created by any of these roles inherit these grants (DB-009, F-06)
+-- Apply for both the init user (postgres) and the migration user (design_readwrite)
 ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO design_readonly;
 ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO design_readwrite;
 ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON SEQUENCES TO design_readwrite;
+ALTER DEFAULT PRIVILEGES FOR ROLE design_readwrite IN SCHEMA public GRANT SELECT ON TABLES TO design_readonly;
 
 -- 6. Schema Versioning
 CREATE TABLE IF NOT EXISTS schema_version (

@@ -503,6 +503,21 @@ class TestMCPTools(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("../../", result)
         self.assertIn("/tmp/", result)
 
+    async def test_export_distinct_projects_no_collision(self):
+        """Two projects with similar names should export to different files (SP-08)."""
+        rows = [{"title": "T", "content": "C", "cache_type": "idea",
+                 "created_at": datetime.datetime(2026, 3, 22)}] * 25
+        pool, _, _ = make_pool_mock(rows=rows)
+        with patch("server.read_pool", pool):
+            result1 = await server.export_project_to_markdown("project.v1")
+        pool2, _, _ = make_pool_mock(rows=rows)
+        with patch("server.read_pool", pool2):
+            result2 = await server.export_project_to_markdown("project/v1")
+        # Extract file paths from results
+        path1 = result1.split("Saved locally to: ")[-1].strip()
+        path2 = result2.split("Saved locally to: ")[-1].strip()
+        self.assertNotEqual(path1, path2)
+
     # ------------------------------------------------------------------
     # generate_spec_from_cache
     # ------------------------------------------------------------------
@@ -605,7 +620,23 @@ class TestMCPTools(unittest.IsolatedAsyncioTestCase):
             "some-id", "/etc/passwd"
         )
         self.assertIn("Error", result)
-        self.assertIn("outside allowed", result.lower())
+
+    async def test_link_external_file_rejects_symlink(self):
+        """Symlinks should be rejected to prevent TOCTOU attacks (SP-03)."""
+        import tempfile as tf
+        with tf.NamedTemporaryFile(dir="/tmp", suffix=".md", delete=False) as f:
+            real_path = f.name
+        link_path = real_path + "_link"
+        try:
+            os.symlink(real_path, link_path)
+            result = await server.link_external_file_to_cache(
+                "some-id", link_path
+            )
+            self.assertIn("Error", result)
+            self.assertIn("symlink", result.lower())
+        finally:
+            os.unlink(link_path)
+            os.unlink(real_path)
 
     async def test_link_external_file_not_found(self):
         result = await server.link_external_file_to_cache(
@@ -691,10 +722,20 @@ class TestMCPTools(unittest.IsolatedAsyncioTestCase):
     # _sanitize_filename
     # ------------------------------------------------------------------
     def test_sanitize_filename_removes_traversal(self):
-        self.assertEqual(server._sanitize_filename("../../etc/evil"), "______etc_evil")
+        result = server._sanitize_filename("../../etc/evil")
+        self.assertTrue(result.startswith("______etc_evil_"))
+        self.assertNotIn("/", result)
+        self.assertNotIn("..", result)
 
     def test_sanitize_filename_keeps_safe_chars(self):
-        self.assertEqual(server._sanitize_filename("my-project_1"), "my-project_1")
+        result = server._sanitize_filename("my-project_1")
+        self.assertTrue(result.startswith("my-project_1_"))
+
+    def test_sanitize_filename_distinct_names_no_collision(self):
+        """Two names that sanitize identically should get different hashes (SP-08)."""
+        a = server._sanitize_filename("project.v1")
+        b = server._sanitize_filename("project/v1")
+        self.assertNotEqual(a, b)
 
     # ------------------------------------------------------------------
     # _validate_file_path
@@ -707,6 +748,24 @@ class TestMCPTools(unittest.IsolatedAsyncioTestCase):
 
     def test_validate_file_path_traversal_denied(self):
         self.assertFalse(server._validate_file_path("/tmp/../etc/passwd"))
+
+    def test_validate_file_path_rejects_symlinks(self):
+        """Symlinks should be rejected when reject_symlinks=True (SP-03)."""
+        import tempfile
+        with tempfile.NamedTemporaryFile(dir="/tmp", delete=False) as f:
+            real_path = f.name
+        link_path = real_path + "_link"
+        try:
+            os.symlink(real_path, link_path)
+            # Without reject_symlinks, symlink in /tmp/ is allowed
+            self.assertTrue(server._validate_file_path(link_path))
+            # With reject_symlinks, it's rejected
+            self.assertFalse(
+                server._validate_file_path(link_path, reject_symlinks=True)
+            )
+        finally:
+            os.unlink(link_path)
+            os.unlink(real_path)
 
     # ------------------------------------------------------------------
     # _quote_conninfo_value
