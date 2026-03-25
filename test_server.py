@@ -941,6 +941,65 @@ class TestMCPTools(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("DROP TABLE", sql)
         self.assertIn(payload, params)
 
+    # ------------------------------------------------------------------
+    # import_markdown
+    # ------------------------------------------------------------------
+    async def test_import_markdown_with_headings(self):
+        md = "# Title\nIntro\n## Section A\nContent A\n## Section B\nContent B\n"
+        with tempfile.NamedTemporaryFile(
+            suffix=".md", dir="/tmp", mode="w", delete=False
+        ) as f:
+            f.write(md)
+            fpath = f.name
+        try:
+            pool, _, _ = make_pool_mock()
+            model_mock = make_embedding_mock()
+            with patch("server.write_pool", pool), \
+                 patch("server.get_embedding_model", new_callable=AsyncMock, return_value=model_mock), \
+                 patch("asyncio.to_thread", side_effect=fake_to_thread):
+                result = await server.import_markdown("proj", fpath)
+            self.assertIn("2 section(s)", result)
+        finally:
+            os.unlink(fpath)
+
+    async def test_import_markdown_no_headings(self):
+        md = "Just plain text content\nWith multiple lines\n"
+        with tempfile.NamedTemporaryFile(
+            suffix=".md", dir="/tmp", mode="w", delete=False
+        ) as f:
+            f.write(md)
+            fpath = f.name
+        try:
+            pool, _, _ = make_pool_mock()
+            model_mock = make_embedding_mock()
+            with patch("server.write_pool", pool), \
+                 patch("server.get_embedding_model", new_callable=AsyncMock, return_value=model_mock), \
+                 patch("asyncio.to_thread", side_effect=fake_to_thread):
+                result = await server.import_markdown("proj", fpath)
+            self.assertIn("1 section(s)", result)
+        finally:
+            os.unlink(fpath)
+
+    async def test_import_markdown_invalid_path(self):
+        result = await server.import_markdown("p", "relative.md")
+        self.assertIn("Error", result)
+
+    async def test_import_markdown_outside_allowed(self):
+        result = await server.import_markdown("p", "/etc/passwd")
+        self.assertIn("Error", result)
+
+    async def test_import_markdown_empty_file(self):
+        with tempfile.NamedTemporaryFile(
+            suffix=".md", dir="/tmp", mode="w", delete=False
+        ) as f:
+            f.write("")
+            fpath = f.name
+        try:
+            result = await server.import_markdown("proj", fpath)
+            self.assertIn("Error", result)
+        finally:
+            os.unlink(fpath)
+
 
 if __name__ == "__main__":
     unittest.main()
