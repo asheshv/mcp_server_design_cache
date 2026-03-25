@@ -99,7 +99,7 @@ class TestMCPTools(unittest.IsolatedAsyncioTestCase):
         model_mock = make_embedding_mock()
 
         with patch("server.read_pool", pool), \
-             patch("server.get_embedding_model", return_value=model_mock), \
+             patch("server.get_embedding_model", new_callable=AsyncMock, return_value=model_mock), \
              patch("asyncio.to_thread", side_effect=fake_to_thread):
             result = await server.search_design(
                 "myproject", "auth", limit=1, offset=0, tags=["security"]
@@ -116,7 +116,7 @@ class TestMCPTools(unittest.IsolatedAsyncioTestCase):
         pool, _, _ = make_pool_mock(rows=rows)
         model_mock = make_embedding_mock()
         with patch("server.read_pool", pool), \
-             patch("server.get_embedding_model", return_value=model_mock), \
+             patch("server.get_embedding_model", new_callable=AsyncMock, return_value=model_mock), \
              patch("asyncio.to_thread", side_effect=fake_to_thread):
             result = await server.search_design(
                 "p", "q", tags=["t1", "t2"], tag_logic="OR"
@@ -131,7 +131,7 @@ class TestMCPTools(unittest.IsolatedAsyncioTestCase):
         pool, _, _ = make_pool_mock(rows=rows)
         model_mock = make_embedding_mock()
         with patch("server.read_pool", pool), \
-             patch("server.get_embedding_model", return_value=model_mock), \
+             patch("server.get_embedding_model", new_callable=AsyncMock, return_value=model_mock), \
              patch("asyncio.to_thread", side_effect=fake_to_thread):
             result = await server.search_design(
                 "p", "q", tags=["bad"], tag_logic="NOT"
@@ -143,7 +143,7 @@ class TestMCPTools(unittest.IsolatedAsyncioTestCase):
         model_mock = make_embedding_mock()
 
         with patch("server.read_pool", pool), \
-             patch("server.get_embedding_model", return_value=model_mock), \
+             patch("server.get_embedding_model", new_callable=AsyncMock, return_value=model_mock), \
              patch("asyncio.to_thread", side_effect=fake_to_thread):
             result = await server.search_design("myproject", "unknown-query")
 
@@ -151,7 +151,7 @@ class TestMCPTools(unittest.IsolatedAsyncioTestCase):
 
     async def test_search_design_invalid_tag_logic(self):
         model_mock = make_embedding_mock()
-        with patch("server.get_embedding_model", return_value=model_mock), \
+        with patch("server.get_embedding_model", new_callable=AsyncMock, return_value=model_mock), \
              patch("asyncio.to_thread", side_effect=fake_to_thread):
             result = await server.search_design("p", "q", tag_logic="INVALID")
         self.assertIn("Error", result)
@@ -160,7 +160,7 @@ class TestMCPTools(unittest.IsolatedAsyncioTestCase):
         pool, _, cur = make_pool_mock(rows=[])
         model_mock = make_embedding_mock()
         with patch("server.read_pool", pool), \
-             patch("server.get_embedding_model", return_value=model_mock), \
+             patch("server.get_embedding_model", new_callable=AsyncMock, return_value=model_mock), \
              patch("asyncio.to_thread", side_effect=fake_to_thread):
             result = await server.search_design(
                 "p", "q", limit=-5, offset=-10
@@ -202,7 +202,7 @@ class TestMCPTools(unittest.IsolatedAsyncioTestCase):
         model_mock = make_embedding_mock()
 
         with patch("server.write_pool", pool), \
-             patch("server.get_embedding_model", return_value=model_mock), \
+             patch("server.get_embedding_model", new_callable=AsyncMock, return_value=model_mock), \
              patch("asyncio.to_thread", side_effect=fake_to_thread):
             result = await server.store_note(
                 "myproject", "New Idea", "Content text", "idea", tags=["t1"]
@@ -235,11 +235,35 @@ class TestMCPTools(unittest.IsolatedAsyncioTestCase):
         model_mock = make_embedding_mock()
 
         with patch("server.write_pool", pool), \
-             patch("server.get_embedding_model", return_value=model_mock), \
+             patch("server.get_embedding_model", new_callable=AsyncMock, return_value=model_mock), \
              patch("asyncio.to_thread", side_effect=fake_to_thread):
             result = await server.update_note("some-id", content="New content")
 
         self.assertIn("updated successfully", result)
+
+    async def test_update_note_uses_for_update(self):
+        """Verify SELECT includes FOR UPDATE for row locking."""
+        existing = {"title": "T", "content": "C",
+                    "cache_type": "idea", "tags": []}
+        pool, conn, cur = make_pool_mock(fetchone_row=existing)
+
+        with patch("server.write_pool", pool):
+            await server.update_note("some-id", cache_type="project")
+
+        select_sql = cur.execute.call_args_list[0][0][0]
+        self.assertIn("FOR UPDATE", select_sql)
+
+    async def test_update_note_sets_updated_at(self):
+        """Verify UPDATE includes updated_at = now()."""
+        existing = {"title": "T", "content": "C",
+                    "cache_type": "idea", "tags": []}
+        pool, conn, cur = make_pool_mock(fetchone_row=existing)
+
+        with patch("server.write_pool", pool):
+            await server.update_note("some-id", cache_type="project")
+
+        update_sql = cur.execute.call_args_list[-1][0][0]
+        self.assertIn("updated_at", update_sql)
 
     async def test_update_note_type_only_skips_embedding(self):
         existing = {"title": "Title", "content": "Content",
@@ -297,7 +321,7 @@ class TestMCPTools(unittest.IsolatedAsyncioTestCase):
         model_mock = make_embedding_mock()
 
         with patch("server.write_pool", pool), \
-             patch("server.get_embedding_model", return_value=model_mock), \
+             patch("server.get_embedding_model", new_callable=AsyncMock, return_value=model_mock), \
              patch("asyncio.to_thread", side_effect=fake_to_thread):
             result = await server.summarize_and_cleanup(
                 "myproject", ["id-1", "id-2"], "A summary", "New Summary Title"
@@ -312,7 +336,7 @@ class TestMCPTools(unittest.IsolatedAsyncioTestCase):
         model_mock = make_embedding_mock()
 
         with patch("server.write_pool", pool), \
-             patch("server.get_embedding_model", return_value=model_mock), \
+             patch("server.get_embedding_model", new_callable=AsyncMock, return_value=model_mock), \
              patch("asyncio.to_thread", side_effect=fake_to_thread):
             await server.summarize_and_cleanup(
                 "myproject", ["id-1"], "summary", "title"
@@ -517,7 +541,7 @@ class TestMCPTools(unittest.IsolatedAsyncioTestCase):
 
         with patch("server.read_pool", read_pool), \
              patch("server.write_pool", write_pool), \
-             patch("server.get_embedding_model", return_value=model_mock), \
+             patch("server.get_embedding_model", new_callable=AsyncMock, return_value=model_mock), \
              patch("asyncio.to_thread", side_effect=fake_to_thread):
             result = await server.generate_adr_from_cache(
                 "idea-id", status="accepted"
@@ -550,7 +574,7 @@ class TestMCPTools(unittest.IsolatedAsyncioTestCase):
 
         with patch("server.read_pool", read_pool), \
              patch("server.write_pool", write_pool), \
-             patch("server.get_embedding_model", return_value=model_mock), \
+             patch("server.get_embedding_model", new_callable=AsyncMock, return_value=model_mock), \
              patch("asyncio.to_thread", side_effect=fake_to_thread):
             result = await server.sync_doc_status(
                 "cache-id", "/tmp/spec.md", "implemented"
@@ -602,7 +626,7 @@ class TestMCPTools(unittest.IsolatedAsyncioTestCase):
 
             with patch("server.read_pool", read_pool), \
                  patch("server.write_pool", write_pool), \
-                 patch("server.get_embedding_model", return_value=model_mock), \
+                 patch("server.get_embedding_model", new_callable=AsyncMock, return_value=model_mock), \
                  patch("asyncio.to_thread", side_effect=fake_to_thread):
                 result = await server.link_external_file_to_cache(
                     "cache-id", filepath, "spec"
@@ -689,7 +713,7 @@ class TestMCPTools(unittest.IsolatedAsyncioTestCase):
     # ------------------------------------------------------------------
     def test_quote_conninfo_escapes_quotes(self):
         result = server._quote_conninfo_value("pass'word")
-        self.assertEqual(result, "'pass\\'word'")
+        self.assertEqual(result, "'pass''word'")
 
     def test_quote_conninfo_escapes_backslashes(self):
         result = server._quote_conninfo_value("pass\\word")
@@ -816,6 +840,27 @@ class TestMCPTools(unittest.IsolatedAsyncioTestCase):
         self.assertIn("No notes found", result)
 
     # ------------------------------------------------------------------
+    # Missing coverage from Round 2 (F-07, F-08)
+    # ------------------------------------------------------------------
+    async def test_get_retention_policies_empty(self):
+        pool, _, _ = make_pool_mock(rows=[])
+        with patch("server.read_pool", pool):
+            result = await server.get_retention_policies()
+        self.assertIn("No retention policies found", result)
+
+    async def test_get_compression_below_threshold(self):
+        """Notes exist but total size is below char_limit."""
+        rows = [{"id": "1", "title": "Small", "content_len": 50,
+                 "cache_type": "idea", "tags": []}]
+        pool, _, _ = make_pool_mock(rows=rows)
+        with patch("server.read_pool", pool):
+            result = await server.get_compression_opportunities(
+                "p1", char_limit=5000
+            )
+        self.assertIn("healthy", result.lower())
+        self.assertNotIn("HIGH", result)
+
+    # ------------------------------------------------------------------
     # SQL injection verification (F-09)
     # ------------------------------------------------------------------
     async def test_store_note_uses_parameterized_query(self):
@@ -825,7 +870,7 @@ class TestMCPTools(unittest.IsolatedAsyncioTestCase):
         payload = "'; DROP TABLE design_cache; --"
 
         with patch("server.write_pool", pool), \
-             patch("server.get_embedding_model", return_value=model_mock), \
+             patch("server.get_embedding_model", new_callable=AsyncMock, return_value=model_mock), \
              patch("asyncio.to_thread", side_effect=fake_to_thread):
             await server.store_note("proj", payload, "content")
 

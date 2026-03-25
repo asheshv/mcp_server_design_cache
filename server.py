@@ -34,8 +34,12 @@ if not DB_READ_PASS or not DB_WRITE_PASS:
 
 
 def _quote_conninfo_value(val: str) -> str:
-    """Escape a value for use in a libpq conninfo string (H-3, SEC-05)."""
-    return "'" + val.replace("\\", "\\\\").replace("'", "\\'") + "'"
+    """Escape a value for use in a libpq conninfo string (H-3, SEC-05).
+
+    Per libpq docs, single quotes inside values are escaped by doubling
+    them (not backslash-escaping). Backslashes are escaped as \\\\.
+    """
+    return "'" + val.replace("\\", "\\\\").replace("'", "''") + "'"
 
 
 # Build connection URIs with proper quoting to prevent injection
@@ -155,31 +159,43 @@ MIGRATIONS = {
 
 
 async def apply_migrations():
-    """Applies pending migrations, each in its own transaction."""
+    """Applies pending migrations, each in its own transaction.
+
+    Uses an advisory lock to prevent concurrent migration execution (F-03).
+    """
     async with write_pool.connection() as conn:
         async with conn.cursor() as cur:
-            await cur.execute("""
-                CREATE TABLE IF NOT EXISTS schema_version (
-                    version INTEGER PRIMARY KEY,
-                    applied_at TIMESTAMPTZ DEFAULT now()
-                )
-            """)
-            await cur.execute("SELECT MAX(version) FROM schema_version")
-            row = await cur.fetchone()
-            current_v = row[0] if row and row[0] is not None else 0
-
-            for v in sorted(MIGRATIONS.keys()):
-                if v > current_v:
-                    print(
-                        f"--- Applying Database Migration v{v} ---",
-                        file=sys.stderr,
+            # Bootstrap schema_version table in its own transaction (F-02)
+            async with conn.transaction():
+                await cur.execute("""
+                    CREATE TABLE IF NOT EXISTS schema_version (
+                        version INTEGER PRIMARY KEY,
+                        applied_at TIMESTAMPTZ DEFAULT now()
                     )
-                    async with conn.transaction():
-                        await cur.execute(MIGRATIONS[v])
-                        await cur.execute(
-                            "INSERT INTO schema_version (version) VALUES (%s)",
-                            (v,),
+                """)
+
+            # Advisory lock prevents concurrent migration runners (F-03)
+            await cur.execute("SELECT pg_advisory_lock(2147483647)")
+            try:
+                await cur.execute("SELECT MAX(version) FROM schema_version")
+                row = await cur.fetchone()
+                current_v = row[0] if row and row[0] is not None else 0
+
+                for v in sorted(MIGRATIONS.keys()):
+                    if v > current_v:
+                        print(
+                            f"--- Applying Database Migration v{v} ---",
+                            file=sys.stderr,
                         )
+                        async with conn.transaction():
+                            await cur.execute(MIGRATIONS[v])
+                            await cur.execute(
+                                "INSERT INTO schema_version (version) "
+                                "VALUES (%s) ON CONFLICT (version) DO NOTHING",
+                                (v,),
+                            )
+            finally:
+                await cur.execute("SELECT pg_advisory_unlock(2147483647)")
     print("Database schema is up-to-date.", file=sys.stderr)
 
 
@@ -214,7 +230,6 @@ class RateLimiter:
             # Prune empty keys to prevent memory growth (M-20, PERF-07)
             if not self.history[tool]:
                 del self.history[tool]
-                self.history[tool] = []
             if len(self.history[tool]) >= self.rpm:
                 raise RuntimeError(f"Rate limit exceeded (Max {self.rpm} RPM)")
             self.history[tool].append(now)
@@ -399,45 +414,46 @@ async def update_note(
     if content is not None and len(content) > MAX_CONTENT_LENGTH:
         return f"Error: content exceeds maximum length of {MAX_CONTENT_LENGTH} characters."
 
-    # Single write_pool connection with FOR UPDATE to prevent TOCTOU (C-2)
+    # Single write_pool connection with explicit transaction and FOR UPDATE (C-2, SP-04, F-05)
     async with write_pool.connection() as conn:
-        async with conn.cursor(row_factory=dict_row) as cur:
-            await cur.execute(
-                "SELECT title, content, cache_type, tags "
-                "FROM design_cache WHERE id = %s FOR UPDATE",
-                (cache_id,),
-            )
-            row = await cur.fetchone()
-
-            if not row:
-                return f"Error: No design note found with ID '{cache_id}'."
-
-            new_title = title if title is not None else row["title"]
-            new_content = content if content is not None else row["content"]
-            new_type = cache_type if cache_type is not None else row["cache_type"]
-            new_tags = tags if tags is not None else row["tags"]
-
-            vector_list = None
-            if title is not None or content is not None:
-                model = await get_embedding_model()
-                vector = await asyncio.to_thread(
-                    model.encode, f"{new_title}\n{new_content}"
+        async with conn.transaction():
+            async with conn.cursor(row_factory=dict_row) as cur:
+                await cur.execute(
+                    "SELECT title, content, cache_type, tags "
+                    "FROM design_cache WHERE id = %s FOR UPDATE",
+                    (cache_id,),
                 )
-                vector_list = vector.tolist()
+                row = await cur.fetchone()
 
-            if vector_list is not None:
-                await conn.execute(
-                    "UPDATE design_cache SET title = %s, content = %s, "
-                    "cache_type = %s, tags = %s, embedding = %s::vector, "
-                    "updated_at = now() WHERE id = %s",
-                    (new_title, new_content, new_type, new_tags, vector_list, cache_id),
-                )
-            else:
-                await conn.execute(
-                    "UPDATE design_cache SET cache_type = %s, tags = %s, "
-                    "updated_at = now() WHERE id = %s",
-                    (new_type, new_tags, cache_id),
-                )
+                if not row:
+                    return f"Error: No design note found with ID '{cache_id}'."
+
+                new_title = title if title is not None else row["title"]
+                new_content = content if content is not None else row["content"]
+                new_type = cache_type if cache_type is not None else row["cache_type"]
+                new_tags = tags if tags is not None else row["tags"]
+
+                vector_list = None
+                if title is not None or content is not None:
+                    model = await get_embedding_model()
+                    vector = await asyncio.to_thread(
+                        model.encode, f"{new_title}\n{new_content}"
+                    )
+                    vector_list = vector.tolist()
+
+                if vector_list is not None:
+                    await cur.execute(
+                        "UPDATE design_cache SET title = %s, content = %s, "
+                        "cache_type = %s, tags = %s, embedding = %s::vector, "
+                        "updated_at = now() WHERE id = %s",
+                        (new_title, new_content, new_type, new_tags, vector_list, cache_id),
+                    )
+                else:
+                    await cur.execute(
+                        "UPDATE design_cache SET cache_type = %s, tags = %s, "
+                        "updated_at = now() WHERE id = %s",
+                        (new_type, new_tags, cache_id),
+                    )
 
     return f"Note '{cache_id}' updated successfully."
 

@@ -66,4 +66,7 @@ CREATE TABLE IF NOT EXISTS schema_version (
     version INTEGER PRIMARY KEY,
     applied_at TIMESTAMPTZ DEFAULT now()
 );
-INSERT INTO schema_version (version) VALUES (1) ON CONFLICT DO NOTHING;
+-- Seed at version 4 to match init.sql schema (which already includes tags,
+-- idx_semantic, idx_project_name, and updated_at). Migrations only run on
+-- upgrades from older schema versions.
+INSERT INTO schema_version (version) VALUES (4) ON CONFLICT DO NOTHING;
