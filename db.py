@@ -1,11 +1,12 @@
 """Database connection pools and schema migrations."""
+
 import sys
-import asyncio
-from psycopg_pool import AsyncConnectionPool
+
 from pgvector.psycopg import register_vector_async
+from psycopg_pool import AsyncConnectionPool
 
 from config import (
-    DB_HOST, DB_PORT, DB_NAME, DB_READ_PASS, DB_WRITE_PASS,
+    DB_HOST, DB_NAME, DB_PORT, DB_READ_PASS, DB_WRITE_PASS,
     MAX_LIFETIME, MAX_POOL_SIZE, MIN_POOL_SIZE,
 )
 

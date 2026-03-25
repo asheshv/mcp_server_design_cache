@@ -7,23 +7,30 @@ Tool definitions and FastMCP app. Infrastructure lives in:
 - embedding.py: model loading
 - utils.py: file validation, rate limiting, project detection
 """
-import aiofiles
 import asyncio
 import os
 import time
-from contextlib import asynccontextmanager
 from collections import defaultdict
-from psycopg.rows import dict_row
+from contextlib import asynccontextmanager
+
+import aiofiles
 from mcp.server.fastmcp import FastMCP
+from psycopg.rows import dict_row
 
 from config import (
-    MAX_TITLE_LENGTH, MAX_CONTENT_LENGTH,
-    VALID_TAG_LOGIC, VALID_CACHE_TYPES, VALID_ADR_STATUSES,
+    MAX_CONTENT_LENGTH,
+    MAX_TITLE_LENGTH,
+    VALID_ADR_STATUSES,
+    VALID_CACHE_TYPES,
+    VALID_TAG_LOGIC,
 )
-from db import read_pool, write_pool, apply_migrations
+from db import apply_migrations, read_pool, write_pool
 from embedding import get_embedding_model
 from utils import (
-    sanitize_filename, validate_file_path, get_local_project_name, RateLimiter,
+    RateLimiter,
+    get_local_project_name,
+    sanitize_filename,
+    validate_file_path,
 )
 
 
