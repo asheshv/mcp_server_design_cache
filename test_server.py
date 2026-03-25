@@ -920,6 +920,46 @@ class TestMCPTools(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("HIGH", result)
 
     # ------------------------------------------------------------------
+    # EmbeddingCache
+    # ------------------------------------------------------------------
+    async def test_embedding_cache_hit(self):
+        cache = server.EmbeddingCache(max_size=10, ttl_seconds=60)
+        await cache.put("hello", [0.1, 0.2])
+        result = await cache.get("hello")
+        self.assertEqual(result, [0.1, 0.2])
+
+    async def test_embedding_cache_miss(self):
+        cache = server.EmbeddingCache()
+        result = await cache.get("nonexistent")
+        self.assertIsNone(result)
+
+    async def test_embedding_cache_ttl_expiry(self):
+        cache = server.EmbeddingCache(ttl_seconds=1)
+        await cache.put("old", [0.1])
+        import time as _time
+        cache.cache["old"] = ([0.1], _time.time() - 10)
+        result = await cache.get("old")
+        self.assertIsNone(result)
+
+    async def test_embedding_cache_eviction(self):
+        cache = server.EmbeddingCache(max_size=2, ttl_seconds=300)
+        await cache.put("a", [1.0])
+        await cache.put("b", [2.0])
+        await cache.put("c", [3.0])
+        self.assertIsNone(await cache.get("a"))
+        self.assertEqual(await cache.get("c"), [3.0])
+
+    async def test_embedding_cache_clear(self):
+        cache = server.EmbeddingCache()
+        await cache.put("x", [1.0])
+        await cache.clear()
+        self.assertIsNone(await cache.get("x"))
+
+    async def test_clear_embedding_cache_tool(self):
+        result = await server.clear_embedding_cache()
+        self.assertIn("cleared", result.lower())
+
+    # ------------------------------------------------------------------
     # SQL injection verification (F-09)
     # ------------------------------------------------------------------
     async def test_store_note_uses_parameterized_query(self):

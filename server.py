@@ -44,6 +44,52 @@ mcp = FastMCP("SecureDesignMemory", lifespan=app_lifespan)
 limiter = RateLimiter(60)
 
 
+# --- EMBEDDING CACHE ---
+class EmbeddingCache:
+    """LRU cache for embedding vectors with TTL expiry."""
+
+    def __init__(self, max_size: int = 128, ttl_seconds: int = 300):
+        self.max_size = max_size
+        self.ttl_seconds = ttl_seconds
+        self.cache: dict[str, tuple[list[float], float]] = {}
+        self.lock = asyncio.Lock()
+
+    async def get(self, text: str) -> list[float] | None:
+        async with self.lock:
+            if text in self.cache:
+                vector, ts = self.cache[text]
+                if time.time() - ts < self.ttl_seconds:
+                    return vector
+                del self.cache[text]
+            return None
+
+    async def put(self, text: str, vector: list[float]):
+        async with self.lock:
+            if len(self.cache) >= self.max_size:
+                oldest_key = min(self.cache, key=lambda k: self.cache[k][1])
+                del self.cache[oldest_key]
+            self.cache[text] = (vector, time.time())
+
+    async def clear(self):
+        async with self.lock:
+            self.cache.clear()
+
+
+embedding_cache = EmbeddingCache()
+
+
+async def encode_text(text: str) -> list[float]:
+    """Encode text to embedding vector, using cache when available."""
+    cached = await embedding_cache.get(text)
+    if cached is not None:
+        return cached
+    model = await get_embedding_model()
+    vector = await asyncio.to_thread(model.encode, text)
+    vector_list = vector.tolist()
+    await embedding_cache.put(text, vector_list)
+    return vector_list
+
+
 # --- SEARCH TOOLS ---
 @mcp.tool()
 async def search_design(
@@ -66,9 +112,7 @@ async def search_design(
     if tag_logic not in VALID_TAG_LOGIC:
         return f"Error: tag_logic must be one of {VALID_TAG_LOGIC}"
 
-    model = await get_embedding_model()
-    query_vector = await asyncio.to_thread(model.encode, query)
-    query_vector_list = query_vector.tolist()
+    query_vector_list = await encode_text(query)
 
     params: dict = {
         "query": query,
@@ -170,9 +214,7 @@ async def store_note(
     if len(content) > MAX_CONTENT_LENGTH:
         return f"Error: content exceeds maximum length of {MAX_CONTENT_LENGTH} characters."
 
-    model = await get_embedding_model()
-    vector = await asyncio.to_thread(model.encode, f"{title}\n{content}")
-    vector_list = vector.tolist()
+    vector_list = await encode_text(f"{title}\n{content}")
 
     async with write_pool.connection() as conn:
         await conn.execute(
@@ -220,11 +262,7 @@ async def update_note(
 
                 vector_list = None
                 if title is not None or content is not None:
-                    model = await get_embedding_model()
-                    vector = await asyncio.to_thread(
-                        model.encode, f"{new_title}\n{new_content}"
-                    )
-                    vector_list = vector.tolist()
+                    vector_list = await encode_text(f"{new_title}\n{new_content}")
 
                 if vector_list is not None:
                     await cur.execute(
@@ -270,9 +308,7 @@ async def summarize_and_cleanup(
     if not ids_to_summarize:
         return "Error: No IDs provided to summarize."
 
-    model = await get_embedding_model()
-    vector = await asyncio.to_thread(model.encode, f"{new_title}\n{summary_text}")
-    vector_list = vector.tolist()
+    vector_list = await encode_text(f"{new_title}\n{summary_text}")
 
     async with write_pool.connection() as conn:
         async with conn.transaction():
@@ -521,9 +557,7 @@ Chosen Option: **[AI: Please specify based on our chat]**
 [AI: Define how we verify this architectural change]
 """
     new_title = f"{record['title']} [ADR status: {status.upper()}]"
-    model = await get_embedding_model()
-    vector = await asyncio.to_thread(model.encode, f"{new_title}\n{adr_content}")
-    vector_list = vector.tolist()
+    vector_list = await encode_text(f"{new_title}\n{adr_content}")
 
     async with write_pool.connection() as conn:
         await conn.execute(
@@ -548,9 +582,7 @@ async def sync_doc_status(cache_id: str, file_path: str, status: str = "implemen
 
     new_title = f"{row['title']} [OFFICIAL: {status}]"
     new_content = f"{row['content']}\n\nReference File: {file_path}"
-    model = await get_embedding_model()
-    vector = await asyncio.to_thread(model.encode, f"{new_title}\n{new_content}")
-    vector_list = vector.tolist()
+    vector_list = await encode_text(f"{new_title}\n{new_content}")
 
     async with write_pool.connection() as conn:
         await conn.execute(
@@ -582,9 +614,7 @@ async def link_external_file_to_cache(cache_id: str, file_path: str, category: s
 
     new_title = f"{row['title']} [LINKED {category.upper()}]"
     new_content = f"{row['content']}\n\nLinked File: {file_path}"
-    model = await get_embedding_model()
-    vector = await asyncio.to_thread(model.encode, f"{new_title}\n{new_content}")
-    vector_list = vector.tolist()
+    vector_list = await encode_text(f"{new_title}\n{new_content}")
 
     async with write_pool.connection() as conn:
         await conn.execute(
@@ -698,6 +728,14 @@ async def get_compression_opportunities(project: str, char_limit: int = 5000) ->
             res.append(f"- Titles: {titles}")
             res.append(f"- Suggested Action: Call 'summarize_and_cleanup' with IDs: {ids}")
     return "\n".join(res)
+
+
+@mcp.tool()
+async def clear_embedding_cache() -> str:
+    """Clears the embedding vector cache. Use after model updates or if results seem stale."""
+    await limiter.check("cache_clear")
+    await embedding_cache.clear()
+    return "Embedding cache cleared."
 
 
 if __name__ == "__main__":
