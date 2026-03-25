@@ -139,36 +139,70 @@ async def search_design(
         else:
             tag_filter = "AND tags @> %(tags)s::text[]"
 
+    # RRF: Two separate queries (FTS + vector) merged with Reciprocal Rank Fusion.
+    # This allows each query to use its own index efficiently instead of
+    # forcing a sequential scan with OR between index types.
+    rrf_k = 60  # RRF constant (standard value)
+    fetch_size = max(limit * 3, 20)  # Over-fetch to ensure enough results after merge
+
     async with read_pool.connection() as conn:
         async with conn.cursor(row_factory=dict_row) as cur:
+            # Query 1: Full-text search (uses GIN index)
             await cur.execute(f"""
-                WITH scored AS (
-                    SELECT title, content, cache_type, id, tags,
-                           ts_rank(search_vector, plainto_tsquery('english', %(query)s)) AS keyword_score,
-                           COALESCE((1 - (embedding <=> %(vector)s::vector)), 0) AS semantic_score
-                    FROM design_cache
-                    WHERE project_name = %(project)s
-                    {tag_filter}
-                    AND (
-                        search_vector @@ plainto_tsquery('english', %(query)s)
-                        OR embedding <=> %(vector)s::vector < 0.6
-                    )
-                )
-                SELECT *, (keyword_score + semantic_score) AS combined_score
-                FROM scored
-                ORDER BY combined_score DESC
-                LIMIT %(limit)s OFFSET %(offset)s;
-            """, params)
-            rows = await cur.fetchall()
+                SELECT id, title, content, cache_type, tags,
+                       ts_rank(search_vector, plainto_tsquery('english', %(query)s)) AS score
+                FROM design_cache
+                WHERE project_name = %(project)s
+                {tag_filter}
+                AND search_vector @@ plainto_tsquery('english', %(query)s)
+                ORDER BY score DESC
+                LIMIT %(fetch_size)s;
+            """, {**params, "fetch_size": fetch_size})
+            fts_rows = await cur.fetchall()
 
-    if not rows:
+            # Query 2: Semantic/vector search (uses HNSW index)
+            await cur.execute(f"""
+                SELECT id, title, content, cache_type, tags,
+                       (1 - (embedding <=> %(vector)s::vector)) AS score
+                FROM design_cache
+                WHERE project_name = %(project)s
+                {tag_filter}
+                ORDER BY embedding <=> %(vector)s::vector
+                LIMIT %(fetch_size)s;
+            """, {**params, "fetch_size": fetch_size})
+            vec_rows = await cur.fetchall()
+
+    # Reciprocal Rank Fusion: combine rankings from both result sets
+    rrf_scores: dict[str, float] = {}
+    row_map: dict[str, dict] = {}
+
+    for rank, r in enumerate(fts_rows):
+        rid = str(r['id'])
+        rrf_scores[rid] = rrf_scores.get(rid, 0) + 1.0 / (rrf_k + rank + 1)
+        row_map[rid] = r
+
+    for rank, r in enumerate(vec_rows):
+        rid = str(r['id'])
+        rrf_scores[rid] = rrf_scores.get(rid, 0) + 1.0 / (rrf_k + rank + 1)
+        row_map[rid] = r
+
+    if not rrf_scores:
+        return "No relevant design notes found."
+
+    # Sort by RRF score descending, apply offset and limit
+    sorted_ids = sorted(rrf_scores, key=lambda k: rrf_scores[k], reverse=True)
+    page_ids = sorted_ids[offset:offset + limit]
+
+    if not page_ids:
         return "No relevant design notes found."
 
     output = [
-        f"--- Found {len(rows)} matches (Offset: {offset}). "
+        f"--- Found {len(rrf_scores)} matches (showing {len(page_ids)}, "
+        f"Offset: {offset}). "
         f"Use 'expand_design_note' to read full details. ---"
     ]
-    for r in rows:
+    for rid in page_ids:
+        r = row_map[rid]
         tag_str = f" [Tags: {', '.join(r['tags'])}]" if r.get('tags') else ""
         abstract = (
             r['content'][:250].replace('\n', ' ') + "..."
