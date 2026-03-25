@@ -5,11 +5,13 @@ services:
     environment:
       POSTGRES_DB: design_db
       POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: superpassword
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
     ports:
-      - "5432:5432"
+      # Bind to localhost only to prevent network exposure (SEC-11)
+      - "127.0.0.1:5432:5432"
     volumes:
-      - postgres_data:/var/lib/postgresql
+      # Correct mount path for PostgreSQL data directory (SEC-12)
+      - postgres_data:/var/lib/postgresql/data
       - ./init.sql:/docker-entrypoint-initdb.d/init.sql
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres -d design_db"]
@@ -24,6 +26,8 @@ services:
         condition: service_healthy
     environment:
       - DB_HOST=mcp_db
+      - DB_READ_PASS=${DB_READ_PASS:?Set DB_READ_PASS in .env}
+      - DB_WRITE_PASS=${DB_WRITE_PASS:?Set DB_WRITE_PASS in .env}
     stdin_open: true
     tty: true
 
