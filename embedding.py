@@ -1,4 +1,5 @@
 """Embedding model loading with async-safe lazy initialization."""
+
 import asyncio
 import sys
 

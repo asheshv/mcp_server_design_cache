@@ -28,7 +28,7 @@ os.environ.setdefault("DB_HOST", "localhost")
 os.environ.setdefault("DB_PORT", "5433")
 os.environ.setdefault("DB_NAME", "design_db")
 
-import server
+import server  # noqa: E402
 
 
 async def _setup_test_db():

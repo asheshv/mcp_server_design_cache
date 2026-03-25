@@ -1,4 +1,5 @@
 import asyncio
+
 from psycopg_pool import AsyncConnectionPool
 
 async def main():
