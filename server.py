@@ -7,23 +7,30 @@ Tool definitions and FastMCP app. Infrastructure lives in:
 - embedding.py: model loading
 - utils.py: file validation, rate limiting, project detection
 """
-import aiofiles
 import asyncio
 import os
 import time
-from contextlib import asynccontextmanager
 from collections import defaultdict
-from psycopg.rows import dict_row
+from contextlib import asynccontextmanager
+
+import aiofiles
 from mcp.server.fastmcp import FastMCP
+from psycopg.rows import dict_row
 
 from config import (
-    MAX_TITLE_LENGTH, MAX_CONTENT_LENGTH,
-    VALID_TAG_LOGIC, VALID_CACHE_TYPES, VALID_ADR_STATUSES,
+    MAX_CONTENT_LENGTH,
+    MAX_TITLE_LENGTH,
+    VALID_ADR_STATUSES,
+    VALID_CACHE_TYPES,
+    VALID_TAG_LOGIC,
 )
-from db import read_pool, write_pool, apply_migrations
+from db import apply_migrations, read_pool, write_pool
 from embedding import get_embedding_model
 from utils import (
-    sanitize_filename, validate_file_path, get_local_project_name, RateLimiter,
+    RateLimiter,
+    get_local_project_name,
+    sanitize_filename,
+    validate_file_path,
 )
 
 
@@ -728,6 +735,93 @@ async def get_compression_opportunities(project: str, char_limit: int = 5000) ->
             res.append(f"- Titles: {titles}")
             res.append(f"- Suggested Action: Call 'summarize_and_cleanup' with IDs: {ids}")
     return "\n".join(res)
+
+
+@mcp.tool()
+async def import_markdown(
+    project: str,
+    file_path: str,
+    tags: list[str] | None = None,
+    cache_type: str = "idea",
+) -> str:
+    """
+    Imports a markdown file into the design cache.
+    Splits by ## headings -- each section becomes a separate note.
+    Files without ## headings are stored as a single note.
+    """
+    await limiter.check("import")
+
+    if not os.path.isabs(file_path):
+        return "Error: Please provide an absolute file path."
+    if not validate_file_path(file_path):
+        return "Error: File path is outside allowed directories."
+    if not os.path.exists(file_path):
+        return "Error: File not found at the specified path."
+    if cache_type not in VALID_CACHE_TYPES:
+        return f"Error: cache_type must be one of {VALID_CACHE_TYPES}"
+
+    try:
+        async with aiofiles.open(file_path, mode='r') as f:
+            content = await f.read()
+    except Exception:
+        return "Error: Could not read the specified file."
+
+    # Split by ## headings
+    sections: list[tuple[str, str]] = []
+    current_title: str | None = None
+    current_lines: list[str] = []
+
+    for line in content.split('\n'):
+        if line.startswith('## '):
+            if current_title is not None:
+                sections.append((current_title, '\n'.join(current_lines).strip()))
+            current_title = line[3:].strip()
+            current_lines = []
+        elif current_title is not None:
+            current_lines.append(line)
+        else:
+            current_lines.append(line)
+
+    if current_title is not None:
+        sections.append((current_title, '\n'.join(current_lines).strip()))
+    elif current_lines:
+        basename = os.path.basename(file_path).rsplit('.', 1)[0]
+        sections.append((basename, '\n'.join(current_lines).strip()))
+
+    # Filter empty sections
+    sections = [(t, c) for t, c in sections if c.strip()]
+
+    if not sections:
+        return "Error: No content found in the file."
+
+    imported = 0
+    errors = []
+
+    for title, section_content in sections:
+        if len(title) > MAX_TITLE_LENGTH:
+            title = title[:MAX_TITLE_LENGTH]
+        if len(section_content) > MAX_CONTENT_LENGTH:
+            errors.append(f"Skipped '{title}': content exceeds size limit")
+            continue
+
+        vector_list = await encode_text(f"{title}\n{section_content}")
+
+        async with write_pool.connection() as conn:
+            await conn.execute(
+                "INSERT INTO design_cache "
+                "(project_name, title, content, cache_type, embedding, tags) "
+                "VALUES (%s, %s, %s, %s, %s::vector, %s)",
+                (project, title, section_content, cache_type, vector_list, tags),
+            )
+        imported += 1
+
+    result = (
+        f"Imported {imported} section(s) from "
+        f"'{os.path.basename(file_path)}' into project '{project}'."
+    )
+    if errors:
+        result += "\n\nWarnings:\n" + "\n".join(f"- {e}" for e in errors)
+    return result
 
 
 @mcp.tool()

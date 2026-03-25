@@ -1,6 +1,6 @@
 """Configuration constants and environment validation."""
-import os
 
+import os
 
 # --- Database ---
 DB_HOST = os.getenv("DB_HOST", "localhost")

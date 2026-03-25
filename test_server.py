@@ -5,18 +5,19 @@ Tests use unittest.mock to patch the database connection pools and the
 sentence-transformers embedding model, so all tests run offline without
 any live database or network connections required.
 """
-import asyncio
 import datetime
 import os
 import tempfile
+import time
 import unittest
-from unittest.mock import AsyncMock, MagicMock, patch, mock_open
+from unittest.mock import AsyncMock, MagicMock, mock_open, patch
 
 # Patch env vars BEFORE importing server (it fails fast without them)
 os.environ.setdefault("DB_READ_PASS", "test_read_pass")
 os.environ.setdefault("DB_WRITE_PASS", "test_write_pass")
 
-import server
+import db  # noqa: E402
+import server  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -722,32 +723,32 @@ class TestMCPTools(unittest.IsolatedAsyncioTestCase):
     # _sanitize_filename
     # ------------------------------------------------------------------
     def test_sanitize_filename_removes_traversal(self):
-        result = server._sanitize_filename("../../etc/evil")
+        result = server.sanitize_filename("../../etc/evil")
         self.assertTrue(result.startswith("______etc_evil_"))
         self.assertNotIn("/", result)
         self.assertNotIn("..", result)
 
     def test_sanitize_filename_keeps_safe_chars(self):
-        result = server._sanitize_filename("my-project_1")
+        result = server.sanitize_filename("my-project_1")
         self.assertTrue(result.startswith("my-project_1_"))
 
     def test_sanitize_filename_distinct_names_no_collision(self):
         """Two names that sanitize identically should get different hashes (SP-08)."""
-        a = server._sanitize_filename("project.v1")
-        b = server._sanitize_filename("project/v1")
+        a = server.sanitize_filename("project.v1")
+        b = server.sanitize_filename("project/v1")
         self.assertNotEqual(a, b)
 
     # ------------------------------------------------------------------
     # _validate_file_path
     # ------------------------------------------------------------------
     def test_validate_file_path_tmp_allowed(self):
-        self.assertTrue(server._validate_file_path("/tmp/test.md"))
+        self.assertTrue(server.validate_file_path("/tmp/test.md"))
 
     def test_validate_file_path_etc_denied(self):
-        self.assertFalse(server._validate_file_path("/etc/passwd"))
+        self.assertFalse(server.validate_file_path("/etc/passwd"))
 
     def test_validate_file_path_traversal_denied(self):
-        self.assertFalse(server._validate_file_path("/tmp/../etc/passwd"))
+        self.assertFalse(server.validate_file_path("/tmp/../etc/passwd"))
 
     def test_validate_file_path_rejects_symlinks(self):
         """Symlinks should be rejected when reject_symlinks=True (SP-03)."""
@@ -758,10 +759,10 @@ class TestMCPTools(unittest.IsolatedAsyncioTestCase):
         try:
             os.symlink(real_path, link_path)
             # Without reject_symlinks, symlink in /tmp/ is allowed
-            self.assertTrue(server._validate_file_path(link_path))
+            self.assertTrue(server.validate_file_path(link_path))
             # With reject_symlinks, it's rejected
             self.assertFalse(
-                server._validate_file_path(link_path, reject_symlinks=True)
+                server.validate_file_path(link_path, reject_symlinks=True)
             )
         finally:
             os.unlink(link_path)
@@ -771,15 +772,15 @@ class TestMCPTools(unittest.IsolatedAsyncioTestCase):
     # _quote_conninfo_value
     # ------------------------------------------------------------------
     def test_quote_conninfo_escapes_quotes(self):
-        result = server._quote_conninfo_value("pass'word")
+        result = db._quote_conninfo_value("pass'word")
         self.assertEqual(result, "'pass''word'")
 
     def test_quote_conninfo_escapes_backslashes(self):
-        result = server._quote_conninfo_value("pass\\word")
+        result = db._quote_conninfo_value("pass\\word")
         self.assertEqual(result, "'pass\\\\word'")
 
     def test_quote_conninfo_injection_attempt(self):
-        result = server._quote_conninfo_value(
+        result = db._quote_conninfo_value(
             "localhost sslmode=disable host=evil.com"
         )
         # Should be a single quoted value, not multiple params
@@ -792,8 +793,8 @@ class TestMCPTools(unittest.IsolatedAsyncioTestCase):
     # ------------------------------------------------------------------
     async def test_apply_migrations_successful(self):
         write_pool, _, _ = make_pool_mock(fetchone_row=(None,))
-        with patch("server.write_pool", write_pool):
-            await server.apply_migrations()
+        with patch("db.write_pool", write_pool):
+            await db.apply_migrations()
 
     # ------------------------------------------------------------------
     # onboarding & project context
@@ -980,6 +981,65 @@ class TestMCPTools(unittest.IsolatedAsyncioTestCase):
         self.assertIn("%s", sql)
         self.assertNotIn("DROP TABLE", sql)
         self.assertIn(payload, params)
+
+    # ------------------------------------------------------------------
+    # import_markdown
+    # ------------------------------------------------------------------
+    async def test_import_markdown_with_headings(self):
+        md = "# Title\nIntro\n## Section A\nContent A\n## Section B\nContent B\n"
+        with tempfile.NamedTemporaryFile(
+            suffix=".md", dir="/tmp", mode="w", delete=False
+        ) as f:
+            f.write(md)
+            fpath = f.name
+        try:
+            pool, _, _ = make_pool_mock()
+            model_mock = make_embedding_mock()
+            with patch("server.write_pool", pool), \
+                 patch("server.get_embedding_model", new_callable=AsyncMock, return_value=model_mock), \
+                 patch("asyncio.to_thread", side_effect=fake_to_thread):
+                result = await server.import_markdown("proj", fpath)
+            self.assertIn("2 section(s)", result)
+        finally:
+            os.unlink(fpath)
+
+    async def test_import_markdown_no_headings(self):
+        md = "Just plain text content\nWith multiple lines\n"
+        with tempfile.NamedTemporaryFile(
+            suffix=".md", dir="/tmp", mode="w", delete=False
+        ) as f:
+            f.write(md)
+            fpath = f.name
+        try:
+            pool, _, _ = make_pool_mock()
+            model_mock = make_embedding_mock()
+            with patch("server.write_pool", pool), \
+                 patch("server.get_embedding_model", new_callable=AsyncMock, return_value=model_mock), \
+                 patch("asyncio.to_thread", side_effect=fake_to_thread):
+                result = await server.import_markdown("proj", fpath)
+            self.assertIn("1 section(s)", result)
+        finally:
+            os.unlink(fpath)
+
+    async def test_import_markdown_invalid_path(self):
+        result = await server.import_markdown("p", "relative.md")
+        self.assertIn("Error", result)
+
+    async def test_import_markdown_outside_allowed(self):
+        result = await server.import_markdown("p", "/etc/passwd")
+        self.assertIn("Error", result)
+
+    async def test_import_markdown_empty_file(self):
+        with tempfile.NamedTemporaryFile(
+            suffix=".md", dir="/tmp", mode="w", delete=False
+        ) as f:
+            f.write("")
+            fpath = f.name
+        try:
+            result = await server.import_markdown("proj", fpath)
+            self.assertIn("Error", result)
+        finally:
+            os.unlink(fpath)
 
 
 if __name__ == "__main__":
