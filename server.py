@@ -376,27 +376,82 @@ async def get_retention_policies(project: str | None = None) -> str:
 
 @mcp.tool()
 async def run_smart_cleanup() -> str:
-    """Deletes expired notes based on retention policies."""
+    """Cleans up expired notes based on retention policies.
+
+    If auto_compress is True for a project, expired notes are summarized
+    into a single project-level note before deletion. If False, they are
+    hard-deleted.
+    """
     await limiter.check("cleanup")
+
+    # Find expired notes grouped by project and their compression preference
     async with write_pool.connection() as conn:
         async with conn.cursor(row_factory=dict_row) as cur:
             await cur.execute("""
-                WITH deleted AS (
-                    DELETE FROM design_cache c
-                    USING retention_policies p
-                    WHERE c.project_name = p.project_name
-                    AND c.cache_type = 'idea' AND p.days_to_retain > 0
-                    AND c.created_at < now() - (p.days_to_retain || ' days')::interval
-                    RETURNING c.project_name
-                )
-                SELECT project_name, COUNT(*) AS deleted_count
-                FROM deleted GROUP BY project_name
+                SELECT c.id, c.project_name, c.title, c.content,
+                       p.auto_compress
+                FROM design_cache c
+                JOIN retention_policies p
+                    ON c.project_name = p.project_name
+                WHERE c.cache_type = 'idea'
+                AND p.days_to_retain > 0
+                AND c.created_at < now() - (p.days_to_retain || ' days')::interval
+                ORDER BY c.project_name, c.id
             """)
-            results = await cur.fetchall()
-    if not results:
+            expired = await cur.fetchall()
+
+    if not expired:
         return "All projects are within their retention limits."
-    lines = [f"- {r['project_name']}: {r['deleted_count']} notes" for r in results]
-    return "Cleanup complete! Deleted expired notes:\n" + "\n".join(lines)
+
+    # Group by project
+    by_project: dict[str, list[dict]] = defaultdict(list)
+    for row in expired:
+        by_project[row['project_name']].append(row)
+
+    results = []
+    for project_name, notes in by_project.items():
+        auto_compress = notes[0]['auto_compress']
+        ids = [n['id'] for n in notes]
+
+        if auto_compress and len(notes) >= 2:
+            # Summarize into a single project-level note, then delete originals
+            titles = [n['title'] or 'Untitled' for n in notes]
+            summary = (
+                f"Auto-compressed {len(notes)} expired notes:\n\n"
+                + "\n".join(f"- **{t}**" for t in titles)
+            )
+            summary_title = f"Compressed: {len(notes)} expired notes"
+            vector_list = await encode_text(f"{summary_title}\n{summary}")
+
+            async with write_pool.connection() as conn:
+                async with conn.transaction():
+                    async with conn.cursor() as cur:
+                        await cur.execute("""
+                            INSERT INTO design_cache
+                                (project_name, content, cache_type, title,
+                                 summary_of_ids, embedding)
+                            VALUES (%s, %s, 'project', %s, %s, %s::vector)
+                        """, (project_name, summary, summary_title, ids, vector_list))
+                        await cur.execute(
+                            "DELETE FROM design_cache "
+                            "WHERE id = ANY(%s) AND project_name = %s",
+                            (ids, project_name),
+                        )
+            results.append(
+                f"- {project_name}: compressed {len(notes)} notes into summary"
+            )
+        else:
+            # Hard delete
+            async with write_pool.connection() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(
+                        "DELETE FROM design_cache "
+                        "WHERE id = ANY(%s) AND project_name = %s",
+                        (ids, project_name),
+                    )
+            results.append(f"- {project_name}: deleted {len(notes)} notes")
+
+    return "Cleanup complete!\n" + "\n".join(results)
 
 
 @mcp.tool()

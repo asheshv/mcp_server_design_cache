@@ -395,15 +395,38 @@ class TestMCPTools(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn("within their retention limits", result)
 
-    async def test_run_smart_cleanup_deletes_expired(self):
-        deleted_rows = [{"project_name": "myproject", "deleted_count": 3}]
-        write_pool, _, _ = make_pool_mock(rows=deleted_rows)
+    async def test_run_smart_cleanup_hard_deletes_expired(self):
+        """auto_compress=False should hard-delete expired notes."""
+        expired_rows = [
+            {"id": "id-1", "project_name": "myproject", "title": "Old Note",
+             "content": "old content", "auto_compress": False},
+        ]
+        write_pool, _, _ = make_pool_mock(rows=expired_rows)
 
         with patch("server.write_pool", write_pool):
             result = await server.run_smart_cleanup()
 
         self.assertIn("myproject", result)
-        self.assertIn("3", result)
+        self.assertIn("deleted 1 notes", result)
+
+    async def test_run_smart_cleanup_compresses_expired(self):
+        """auto_compress=True with 2+ notes should summarize then delete."""
+        expired_rows = [
+            {"id": "id-1", "project_name": "proj", "title": "Note A",
+             "content": "content a", "auto_compress": True},
+            {"id": "id-2", "project_name": "proj", "title": "Note B",
+             "content": "content b", "auto_compress": True},
+        ]
+        write_pool, _, _ = make_pool_mock(rows=expired_rows)
+        model_mock = make_embedding_mock()
+
+        with patch("server.write_pool", write_pool), \
+             patch("server.get_embedding_model", new_callable=AsyncMock, return_value=model_mock), \
+             patch("asyncio.to_thread", side_effect=fake_to_thread):
+            result = await server.run_smart_cleanup()
+
+        self.assertIn("proj", result)
+        self.assertIn("compressed 2 notes", result)
 
     # ------------------------------------------------------------------
     # health_check
